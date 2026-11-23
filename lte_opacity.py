@@ -116,26 +116,43 @@ def line_opacity(frequency, transitions):
     return total
 
 
-def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None,
-              cross_sections=()):
-    """Yield opacity rows, computing a fresh gas state at each model depth."""
+def prepare_layers(model, lines, config, vmic=2.0, chemistry=None):
+    """Compute the opacity-independent LTE state once per depth."""
     chemistry = chemistry or Thermochemistry()
     reference = {element: model.abundances[atom["atomic_number"] - 1]
                  for element, atom in chemistry.atoms.items()}
     abundances = composition(reference, config)
-    cross_section_grids = [(table, table.on_grid(wavelengths)) for table in cross_sections]
-    for index, row in enumerate(model.structure, start=1):
+    line_species = {line.species for line in lines}
+    for row in model.structure:
         gas = chemistry.solve(row[3], row[5], abundances)
-        unknown = {line.species for line in lines} - gas.partition_functions.keys()
+        unknown = line_species - gas.partition_functions.keys()
         if unknown:
             raise ValueError(f"Unsupported line species: {', '.join(sorted(unknown))}")
         ions = math.fsum(n for species, n in gas.number_densities.items() if species.endswith("+"))
         transitions = [profile_parameters(line, gas, vmic) for line in lines]
-        molecular = [table.mass_opacity(gas, row[5], grid)
-                     for table, grid in cross_section_grids]
-        for j, wavelength in enumerate(wavelengths):
-            absorption, scattering = continuum_opacity(wavelength, gas, ions)
-            line = line_opacity(C_ANGSTROM_S / wavelength, transitions) + sum(x[j] for x in molecular)
+        yield gas, row[5], ions, transitions
+
+
+def layer_opacities(layer, wavelengths, cross_section_grids):
+    """Sample line absorption, continuum absorption, and scattering for a layer."""
+    gas, pressure, ions, transitions = layer
+    molecular = [table.mass_opacity(gas, pressure, grid) for table, grid in cross_section_grids]
+    for j, wavelength in enumerate(wavelengths):
+        absorption, scattering = continuum_opacity(wavelength, gas, ions)
+        line = line_opacity(C_ANGSTROM_S / wavelength, transitions) + sum(row[j] for row in molecular)
+        yield line, absorption, scattering
+
+
+def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None,
+              cross_sections=()):
+    """Yield layer-major opacity rows, with one LTE state per depth."""
+    wavelengths = tuple(wavelengths)
+    grids = [(table, table.on_grid(wavelengths)) for table in cross_sections]
+    for index, layer in enumerate(prepare_layers(model, lines, config, vmic, chemistry), 1):
+        gas = layer[0]
+        for wavelength, (line, absorption, scattering) in zip(
+            wavelengths, layer_opacities(layer, wavelengths, grids)
+        ):
             yield (index, wavelength, line, absorption, scattering,
                    gas.electron_density, gas.mass_density)
 
