@@ -50,6 +50,72 @@ def solve(teff, logg, k1, k2, layers=81, tau_bottom=100.0):
                gravity * column_mass, 4.0 * math.pi * h1, 4.0 * math.pi * h2)
 
 
+def solve_numerical(teff, logg, k1, k2, layers=81, tau_bottom=100.0):
+    """Solve the two-group moment equations on a finite depth grid."""
+    total_h = SIGMA * teff**4 / (4.0 * math.pi)
+    gravity = 10.0**logg
+    reference_opacity = 2.0 / (1.0 / k1 + 1.0 / k2)
+    r1, r2 = k1 / reference_opacity, k2 / reference_opacity
+    r_sum = r1 + r2
+    decay_squared = 3.0 * r1 * r2
+    tau = [
+        math.expm1(math.log1p(tau_bottom) * i / (layers - 1))
+        for i in range(layers)
+    ]
+
+    # Eliminate the LTE source with local radiative equilibrium, and
+    # eliminate H_2 with total flux conservation. For D = J_1 - J_2,
+    # the resulting scalar equation is D'' = 3 r_1 r_2 D.
+    #
+    # At the surface, J_i = H_i / MU gives D' = a D + c.
+    # Integrate D'' over the surface half-cell to impose this condition.
+    a = 1.5 * r_sum * MU
+    c = 1.5 * (r1 - r2) * total_h
+    step = tau[1] - tau[0]
+    diagonal = 1.0 / step + a + 0.5 * step * decay_squared
+    upper = [-1.0 / step / diagonal]
+    rhs = [-c / diagonal]
+
+    # Assemble and eliminate the interior tridiagonal rows. The last
+    # depth has D = 0, the deep diffusion boundary for this benchmark.
+    for i in range(1, layers - 1):
+        left = tau[i] - tau[i - 1]
+        right = tau[i + 1] - tau[i]
+        lower = -1.0 / left
+        diagonal = (
+            1.0 / left + 1.0 / right + 0.5 * (left + right) * decay_squared
+            - lower * upper[-1]
+        )
+        upper.append(-1.0 / right / diagonal)
+        rhs.append(-lower * rhs[-1] / diagonal)
+
+    difference = [0.0] * layers
+    for i in range(layers - 2, -1, -1):
+        difference[i] = rhs[i] - upper[i] * difference[i + 1]
+
+    surface_h1 = 0.5 * (total_h + MU * difference[0])
+    weighted_j_surface = (surface_h1 / r1 + (total_h - surface_h1) / r2) / MU
+    for i, depth in enumerate(tau):
+        d = difference[i]
+        # (J_1/r_1 + J_2/r_2)' = 3 H_total, exactly.
+        weighted_j = weighted_j_surface + 3.0 * total_h * depth
+        j2 = (weighted_j - d / r1) / (1.0 / r1 + 1.0 / r2)
+        j1 = j2 + d
+        source = 2.0 * (r1 * j1 + r2 * j2) / r_sum
+
+        if i == 0:
+            derivative = a * d + c
+        else:
+            step = depth - tau[i - 1]
+            # Convert the face gradient to the node using D'' at the node.
+            derivative = (d - difference[i - 1]) / step + 0.5 * step * decay_squared * d
+        h1 = (derivative / 3.0 + r2 * total_h) / r_sum
+        column_mass = depth / reference_opacity
+        yield (depth, column_mass, (math.pi * source / SIGMA)**0.25,
+               gravity * column_mass, 4.0 * math.pi * h1,
+               4.0 * math.pi * (total_h - h1))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--teff", type=float, default=4300, help="Effective temperature in K")
@@ -58,6 +124,8 @@ def main():
     parser.add_argument("--opacity2", type=float, default=1.0, help="Group 2 opacity in cm²/g")
     parser.add_argument("--layers", type=int, default=81)
     parser.add_argument("--tau-bottom", type=float, default=100.0)
+    parser.add_argument("--numerical", action="store_true",
+                        help="Use the finite-depth numerical solver")
     args = parser.parse_args()
     positive = (args.teff, args.opacity1, args.opacity2, args.tau_bottom)
     if not all(math.isfinite(x) and x > 0 for x in positive) or args.layers < 2:
@@ -68,8 +136,9 @@ def main():
     writer = csv.writer(sys.stdout)
     writer.writerow(("tau_reference", "column_mass_g_cm2", "temperature_K",
                      "pressure_dyn_cm2", "group1_flux_erg_cm2_s", "group2_flux_erg_cm2_s"))
-    writer.writerows(solve(args.teff, args.logg, args.opacity1, args.opacity2,
-                           args.layers, args.tau_bottom))
+    solver = solve_numerical if args.numerical else solve
+    writer.writerows(solver(args.teff, args.logg, args.opacity1, args.opacity2,
+                            args.layers, args.tau_bottom))
 
 
 if __name__ == "__main__":
