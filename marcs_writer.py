@@ -102,8 +102,8 @@ def write_document(model, path):
 
     count = len(model.structure)
     blocks = (model.structure, model.thermodynamics, *model.partial_pressures)
-    if len(blocks) != len(TABLES) or not 2 <= count <= 9999:
-        raise ValueError("Provide both structure tables, three partial-pressure tables, and 2–9999 layers")
+    if len(blocks) != len(TABLES) or not 2 <= count <= 999:
+        raise ValueError("Provide both structure tables, three partial-pressure tables, and 2–999 layers")
     records = list(model.header)
     records.append("Logarithmic chemical number abundances, H always 12.00")
     records.extend(
@@ -121,7 +121,17 @@ def write_document(model, path):
             if len(row) != len(formats) or not all(math.isfinite(value) for value in row):
                 raise ValueError(f"Invalid {header.strip()} row {index}")
             fields = (format(value, spec) for value, spec in zip(row, formats))
-            records.append(f"{index:4d} " + " ".join(f"{field:>11}" for field in fields))
+            if header == STRUCTURE[0]:
+                # Preserve the fixed columns used by downstream MARCS readers.
+                widths = (6, 8, 11, 8, 12, 12, 12, 12)
+                values = list(fields)
+                if any(len(value) >= width for value, width in zip(values, widths)):
+                    raise ValueError(f"MARCS structure field overflows at row {index}")
+                records.append(f"{index:3d}" + "".join(
+                    f"{value:>{width}}" for value, width in zip(values, widths)
+                ))
+            else:
+                records.append(f"{index:4d} " + " ".join(f"{field:>11}" for field in fields))
 
     output = "\n".join(records) + "\n"
     output.encode("ascii")
