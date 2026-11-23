@@ -44,3 +44,15 @@ temperature_K,pressure_dyn_cm2,group1_opacity_cm2_g,group2_opacity_cm2_g
 The solver interpolates in log temperature, log pressure, and log opacity. Pressures below the lowest grid point, including the vacuum surface, use the lowest-pressure row. A temperature outside the table or a pressure above its upper limit stops the run. Make sure the table covers the temperatures encountered during iteration as well as the final profile.
 
 The two groups retain equal Planck weights. Tables supplied here should contain the group means appropriate to that simplified model.
+
+## Compare with a MARCS atmosphere
+
+Use a matching MARCS model structure, continuum table, and sampled surface flux from the same grid point. Keep the published MARCS wavelength grid alongside the flux file. [MARCS downloads](https://marcs.astro.uu.se/data.html) · [File formats and wavelength grid](https://marcs.astro.uu.se/docs.html)
+
+```sh
+python3 odf_transfer.py p00big2.bdf --marcs-model model.mod.gz \
+  --marcs-continuum model.opa.gz > bands.csv
+python3 compare_marcs_flux.py bands.csv flx_wavelengths.vac.gz model.flx.gz > comparison.csv
+```
+
+GiantLayers uses the MARCS true continuum absorption with ATLAS9 line opacity on the fixed temperature and pressure structure. The transfer uses plane-parallel two-stream geometry and omits scattering. The comparison integrates published flux samples only over bands fully covered by the MARCS wavelength grid.
