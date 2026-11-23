@@ -56,3 +56,7 @@ python3 compare_marcs_flux.py bands.csv flx_wavelengths.vac.gz model.flx.gz > co
 ```
 
 GiantLayers uses the MARCS true continuum absorption with ATLAS9 line opacity on the fixed temperature and pressure structure. The transfer uses plane-parallel two-stream geometry. Add `--continuum-scattering` to include isotropic coherent scattering from the MARCS table. The comparison integrates published flux samples only over bands fully covered by the MARCS wavelength grid.
+
+### Inspect radiative heating
+
+Add `--heating-output heating.csv` to write the heating profile while keeping the band flux CSV on standard output. The profile includes column mass, local net heating per gram, integrated heating in each depth cell, and net outward radiative flux. A positive heating rate means the matter absorbs more energy than it emits. The diagnostic uses the conservative two-stream solver and prints the closure error between the summed cell heating and the change in radiative flux across the atmosphere.
