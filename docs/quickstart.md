@@ -112,3 +112,15 @@ python3 native_transfer.py model.mod.gz transitions.csv mixture.json wavelengths
 Add `--adjust-layers 6 --steps 3` to try up to three damped temperature corrections in the outermost six layers. Gas pressure and column mass stay fixed. Each trial recomputes LTE equilibrium, opacity, and transfer, and is accepted only if it reduces the maximum outer-layer net heating relative to thermal emission. Deeper layers supply a fixed lower structure.
 
 The CSV reports initial and corrected temperature, radiative flux, local heating, and integrated cell heating. These corrections are a radiative test on a fixed pressure structure. A converged atmosphere also requires adequate opacity coverage, a flux constraint, and treatment of convective energy transport.
+
+### Use the fiducial cool giant
+
+Use the spherical MARCS GS98 model at 3,500 K, log g 1.0, one solar mass, and 2 km/s microturbulence for the cool-giant benchmark. The model header reports [Fe/H] = +0.05 and [α/Fe] = +0.11 on the MARCS reference scale.
+
+Extract this member from the MARCS GS98 structure archive. Use an empty JSON object for the published abundance pattern. [MARCS GS98 archive](https://marcs.astro.uu.se/data.html)
+
+```text
+s3500_g+1.0_m1.0_t02_gs_z+0.05_a+0.11_c+0.08_n+0.09_o+0.12_r+0.00_s+0.00.mod.gz
+```
+
+The energy-balance CSV includes the radiative flux, published MARCS convective contribution, and total flux error at each depth. The reference flux is scaled by the inverse square of the model radius for spherical models. The transfer still uses plane-parallel geometry. Add `--flux-guard` to a temperature trial to reject steps that reduce the local heating imbalance while worsening the surface flux error. The diagnostic keeps the MARCS convective flux fixed.
