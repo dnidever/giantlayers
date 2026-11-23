@@ -45,7 +45,7 @@ def ray_flux(column_mass, source, opacity, thermal_bottom=False):
     return flux
 
 
-def scattering_ray_flux(column_mass, source, absorption, scattering):
+def scattering_ray_flux(column_mass, source, absorption, scattering, diagnostics=False):
     """Solve two-stream LTE transfer with isotropic coherent scattering.
 
     The symmetric intensity u obeys u'' = epsilon * (u - B) in ray
@@ -97,11 +97,30 @@ def scattering_ray_flux(column_mass, source, absorption, scattering):
         curvature = epsilon[i] * (mean_intensity[i] - source[i])
         flux.append(flux_factor * (left_gradient + 0.5 * steps[i - 1] * curvature))
     flux.append(flux_factor * (bottom_outgoing - mean_intensity[-1]))
-    return flux
+    if not diagnostics:
+        return flux
+
+    # Heating per unit mass uses true absorption. The integrated heating
+    # uses the half-cell optical widths from the discrete transfer equation.
+    heating = []
+    cell_heating = []
+    for i, (mean, thermal, a, fraction) in enumerate(
+        zip(mean_intensity, source, absorption, epsilon)
+    ):
+        excess = mean - thermal
+        left = steps[i - 1] if i else 0.0
+        right = steps[i] if i < last else 0.0
+        heating.append(4 * math.pi * a * excess)
+        cell_heating.append(flux_factor * 0.5 * (left + right) * fraction * excess)
+    return flux, heating, cell_heating
 
 
-def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False, model=None, tabulated_continuum=None, continuum_scattering=False):
-    """Return the band-integrated surface fluxes and total flux versus depth."""
+def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False, model=None, tabulated_continuum=None, continuum_scattering=False, include_heating=False):
+    """Return band fluxes and depth fluxes, optionally with layer heating rows.
+
+    Heating diagnostics use the conservative two-stream discretization, even
+    when continuum scattering is disabled.
+    """
     if continuum_scattering and tabulated_continuum is None:
         raise ValueError("Continuum scattering requires a MARCS continuum table")
     if tabulated_continuum is not None:
@@ -134,6 +153,10 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
 
     bands = []
     total_flux = [0.0] * layers
+    if include_heating:
+        total_heating = [0.0] * layers
+        total_cell_heating = [0.0] * layers
+        no_scattering = [0.0] * layers
     for band, (short, long, weights) in enumerate(quadrature()):
         frequency = 0.5 * C_NM_PER_S * (1 / short + 1 / long)
         source = [planck_nu(frequency, t) for t in temperature]
@@ -157,7 +180,15 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
             )
         surface_flux = 0.0
         for opacity, weight in zip(ranked_opacities, weights):
-            if continuum_scattering:
+            if include_heating:
+                flux, heating, cells = scattering_ray_flux(
+                    mass, source, opacity, scatter if continuum_scattering else no_scattering,
+                    diagnostics=True,
+                )
+                for i, (local, integrated) in enumerate(zip(heating, cells)):
+                    total_heating[i] += weight * local
+                    total_cell_heating[i] += weight * integrated
+            elif continuum_scattering:
                 flux = scattering_ray_flux(mass, source, opacity, scatter)
             else:
                 flux = ray_flux(mass, source, opacity,
@@ -166,6 +197,8 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
             for i, value in enumerate(flux):
                 total_flux[i] += weight * value
         bands.append((short, long, surface_flux))
+    if include_heating:
+        return bands, total_flux, list(zip(mass, total_heating, total_cell_heating))
     return bands, total_flux
 
 
@@ -188,6 +221,8 @@ def main():
                         help="Use true absorption from a matching MARCS .opa or .opa.gz")
     parser.add_argument("--continuum-scattering", action="store_true",
                         help="Include isotropic coherent scattering from the MARCS continuum")
+    parser.add_argument("--heating-output", metavar="CSV",
+                        help="Write depth-dependent radiative heating from the two-stream solver")
     args = parser.parse_args()
     positive = (args.teff, args.continuum, args.tau_bottom)
     if (not all(math.isfinite(x) and x > 0 for x in positive)
@@ -198,12 +233,28 @@ def main():
         odf = None if args.continuum_only else Atlas9ODF(args.odf)
         model = read_model(args.marcs_model) if args.marcs_model else None
         tabulated = MarcsOpacity(args.marcs_continuum) if args.marcs_continuum else None
-        bands, flux = solve(odf, args.teff, args.logg, args.continuum,
+        result = solve(odf, args.teff, args.logg, args.continuum,
                             args.layers, args.tau_bottom, include_hminus=args.hminus, model=model,
                             tabulated_continuum=tabulated,
-                            continuum_scattering=args.continuum_scattering)
+                            continuum_scattering=args.continuum_scattering,
+                            include_heating=args.heating_output is not None)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+    bands, flux = result[:2]
+    if args.heating_output is not None:
+        heating = result[2]
+        try:
+            with open(args.heating_output, "w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(("column_mass_g_cm2", "heating_erg_g_s", "cell_heating_erg_cm2_s",
+                                 "radiative_flux_erg_cm2_s"))
+                writer.writerows((*row, value) for row, value in zip(heating, flux))
+        except OSError as exc:
+            parser.error(str(exc))
+        closure = math.fsum(row[2] for row in heating) - (flux[-1] - flux[0])
+        reference = SIGMA * (model.teff if model else args.teff)**4
+        print(f"Relative heating/flux closure error: {abs(closure) / reference:.3e}",
+              file=sys.stderr)
     writer = csv.writer(sys.stdout)
     writer.writerow(("wavelength_min_nm", "wavelength_max_nm", "surface_flux_erg_cm2_s"))
     writer.writerows(bands)
