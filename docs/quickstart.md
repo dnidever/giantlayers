@@ -140,3 +140,13 @@ Both native opacity and transfer commands accept repeatable `--molecular-cross-s
 The code scales each cross section by the molecule population and isotope fraction. It interpolates in temperature, log pressure, and wavelength, using endpoint temperature or pressure values outside those axes. Wavelengths outside the table contribute zero absorption. Represent each isotopologue once by choosing either its cross section or its transitions on overlapping wavelengths.
 
 The first fiducial experiment sampled ExoMol ToTo and POKAZATEL cross sections over 0.3–50 μm on a 2,200–3,400 K grid. Deeper, hotter layers use the hottest tabulated cross section for each molecule that remains in the chemistry calculation. Use the same wavelength grid when comparing runs. [TiO ToTo](https://exomol.com/data/data-types/opacity/TiO/48Ti-16O/Toto/) · [H₂O POKAZATEL](https://zenodo.org/records/5722861) · [NASA Glenn thermochemistry](https://ntrs.nasa.gov/citations/20020085330)
+
+### Check wavelength sampling
+
+Run the sampling benchmark with cross-section tables on a common wavelength axis. It keeps the reference atmosphere fixed and reports surface flux, the maximum total-flux error with depth, and the heating/flux closure error on each nested grid. Supply any additional wavelengths outside the tabulated range or in line windows through `--supplemental-wavelengths`.
+
+```sh
+python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json.gz h2o.json.gz --strides 4 2 1 > sampling.csv
+```
+
+For expanded optical and infrared coverage, include ExoMol HyVO and Li2015 CO tables on the same grid. If the CO table replaces the explicit CO transitions, remove those transitions from the input CSV. A header-only transition CSV is valid when using cross sections alone. These files add molecular opacity over the common sampled range and inherit the temperature and pressure coverage of the source tables. [VO HyVO](https://exomol.com/data/molecules/VO/51V-16O/HyVO/) · [CO Li2015](https://www.exomol.com/data/molecules/CO/12C-16O/Li2015/)
