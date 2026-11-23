@@ -97,7 +97,7 @@ python3 lte_opacity.py model.mod.gz transitions.csv mixture.json 15570 15585 0.0
 
 The reference MARCS structure supplies the temperature and gas pressure. The solver recomputes the mass density, electron density and species populations at each layer. The output contains sampled line absorption, continuum absorption, and continuum scattering in cm²/g. For isotopologue lines, include the isotopic fraction in the oscillator strength used in the transition CSV.
 
-The bundled data cover 1,000–10,000 K and include neutral atoms, first ions, H⁻, and 20 neutral diatomic molecules. Continuum terms include H⁻ bound-free and free-free absorption, hydrogenic H I bound-free absorption, electron–ion free-free absorption, and Thomson scattering. The hydrogenic continuum terms use unit Gaunt factors. Polyatomic and charged molecules other than H⁻, higher ionization stages, metal photoionization, and calculated collisional line damping are future extensions.
+The bundled data cover 1,000–10,000 K and include neutral atoms, first ions, H⁻, 20 neutral diatomic molecules, and H₂O. Water equilibrium uses the NASA Glenn data through 6,000 K. Continuum terms include H⁻ bound-free and free-free absorption, hydrogenic H I bound-free absorption, electron–ion free-free absorption, and Thomson scattering. The hydrogenic continuum terms use unit Gaunt factors. Additional polyatomic and charged molecules, higher ionization stages, metal photoionization, and calculated collisional line damping are future extensions.
 
 [Atomic and diatomic thermochemistry data](https://doi.org/10.1051/0004-6361/201526961) · [H⁻ continuum data in the ATLAS9 HMINOP routine](https://wwwuser.oats.inaf.it/fiorella.castelli/sources/atlas9g/atlas9mem.for) · [APOGEE DR17 line data reference](https://ui.adsabs.harvard.edu/abs/2021AJ....161..254S/abstract)
 
@@ -124,3 +124,19 @@ s3500_g+1.0_m1.0_t02_gs_z+0.05_a+0.11_c+0.08_n+0.09_o+0.12_r+0.00_s+0.00.mod.gz
 ```
 
 The energy-balance CSV includes the radiative flux, published MARCS convective contribution, and total flux error at each depth. The reference flux is scaled by the inverse square of the model radius for spherical models. The transfer still uses plane-parallel geometry. Add `--flux-guard` to a temperature trial to reject steps that reduce the local heating imbalance while worsening the surface flux error. The diagnostic keeps the MARCS convective flux fixed.
+
+### Add tabulated TiO and water absorption
+
+Both native opacity and transfer commands accept repeatable `--molecular-cross-section FILE` options. A portable JSON or gzip-compressed JSON table has the following fields.
+
+| Field | Contents |
+| --- | --- |
+| `species` | Chemistry species such as `TiO` or `H2O` |
+| `isotopologue` | Optional data identifier |
+| `isotope_fraction` | Fraction of the parent species represented by the table. Defaults to 1. |
+| `temperature_K`, `pressure_dyn_cm2`, `wavelength_vacuum_A` | Increasing grid axes |
+| `cross_section_cm2` | Three-dimensional array ordered by temperature, pressure, and wavelength. Values are in cm² per isotopologue. |
+
+The code scales each cross section by the molecule population and isotope fraction. It interpolates in temperature, log pressure, and wavelength, using endpoint temperature or pressure values outside those axes. Wavelengths outside the table contribute zero absorption. Represent each isotopologue once by choosing either its cross section or its transitions on overlapping wavelengths.
+
+The first fiducial experiment sampled ExoMol ToTo and POKAZATEL cross sections over 0.3–50 μm on a 2,200–3,400 K grid. Deeper, hotter layers use the hottest tabulated cross section for each molecule that remains in the chemistry calculation. Use the same wavelength grid when comparing runs. [TiO ToTo](https://exomol.com/data/data-types/opacity/TiO/48Ti-16O/Toto/) · [H₂O POKAZATEL](https://zenodo.org/records/5722861) · [NASA Glenn thermochemistry](https://ntrs.nasa.gov/citations/20020085330)
