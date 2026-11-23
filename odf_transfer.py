@@ -7,6 +7,7 @@ import sys
 
 from atlas9_odf import Atlas9ODF, C_NM_PER_S, LOG_P, quadrature
 from gray_atmosphere import MU, SIGMA, propagate, solve as gray_atmosphere
+import hminus
 
 PLANCK = 6.62607015e-27  # erg s
 BOLTZMANN = 1.380649e-16  # erg/K
@@ -40,7 +41,7 @@ def ray_flux(column_mass, source, opacity):
     return flux
 
 
-def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0):
+def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False):
     """Return the band-integrated surface fluxes and total flux versus depth."""
     profile = list(gray_atmosphere(teff, logg, continuum, layers, tau_bottom))
     mass = [row[1] for row in profile]
@@ -55,17 +56,25 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0):
             for t, p in zip(temperature, pressure)
         )))
 
+    gas = [hminus.estimate_gas_state(t, p) for t, p in zip(temperature, pressure)] if include_hminus else None
     bands = []
     total_flux = [0.0] * layers
     for band, (short, long, weights) in enumerate(quadrature()):
         frequency = 0.5 * C_NM_PER_S * (1 / short + 1 / long)
         source = [planck_nu(frequency, t) for t in temperature]
+        continuum_opacity = [continuum] * layers
+        if gas is not None:
+            wavelength = C_NM_PER_S / frequency
+            continuum_opacity = [
+                continuum + sum(hminus.mass_opacity(wavelength, t, ne, hydrogen))
+                for t, (ne, hydrogen) in zip(temperature, gas)
+            ]
         if line_columns is None:
-            ranked_opacities = ([continuum] * layers,)
+            ranked_opacities = (continuum_opacity,)
             weights = (sum(weights),)
         else:
             ranked_opacities = (
-                [continuum + opacity for opacity in rank]
+                [background + opacity for background, opacity in zip(continuum_opacity, rank)]
                 for rank in zip(*line_columns[band])
             )
         surface_flux = 0.0
@@ -89,6 +98,8 @@ def main():
     parser.add_argument("--tau-bottom", type=float, default=100)
     parser.add_argument("--continuum-only", action="store_true",
                         help="Skip line opacity for comparison")
+    parser.add_argument("--hminus", action="store_true",
+                        help="Add LTE H⁻ absorption to the constant continuum")
     args = parser.parse_args()
     positive = (args.teff, args.continuum, args.tau_bottom)
     if (not all(math.isfinite(x) and x > 0 for x in positive)
@@ -98,7 +109,7 @@ def main():
     try:
         odf = None if args.continuum_only else Atlas9ODF(args.odf)
         bands, flux = solve(odf, args.teff, args.logg, args.continuum,
-                            args.layers, args.tau_bottom)
+                            args.layers, args.tau_bottom, include_hminus=args.hminus)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
