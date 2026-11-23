@@ -1,0 +1,11 @@
+site_name: GiantLayers
+site_description: Stellar atmosphere modeling for cool giants
+repo_url: https://github.com/dnidever/giantlayers
+repo_name: dnidever/giantlayers
+theme:
+  name: readthedocs
+strict: true
+nav:
+  - Overview: index.md
+  - Quickstart: quickstart.md
+  - Gray atmosphere model: model.md
