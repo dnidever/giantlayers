@@ -10,6 +10,7 @@ from pathlib import Path
 from hminus import K_EV, mass_opacity as hminus_opacity
 from lte_chemistry import AMU, Thermochemistry
 from marcs_writer import read_document
+from molecular_cross_section import MolecularCrossSection
 
 C_ANGSTROM_S = 2.99792458e18
 LIGHT = C_ANGSTROM_S * 1e-8
@@ -115,12 +116,14 @@ def line_opacity(frequency, transitions):
     return total
 
 
-def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None):
+def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None,
+              cross_sections=()):
     """Yield opacity rows, computing a fresh gas state at each model depth."""
     chemistry = chemistry or Thermochemistry()
     reference = {element: model.abundances[atom["atomic_number"] - 1]
                  for element, atom in chemistry.atoms.items()}
     abundances = composition(reference, config)
+    cross_section_grids = [(table, table.on_grid(wavelengths)) for table in cross_sections]
     for index, row in enumerate(model.structure, start=1):
         gas = chemistry.solve(row[3], row[5], abundances)
         unknown = {line.species for line in lines} - gas.partition_functions.keys()
@@ -128,9 +131,11 @@ def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None):
             raise ValueError(f"Unsupported line species: {', '.join(sorted(unknown))}")
         ions = math.fsum(n for species, n in gas.number_densities.items() if species.endswith("+"))
         transitions = [profile_parameters(line, gas, vmic) for line in lines]
-        for wavelength in wavelengths:
+        molecular = [table.mass_opacity(gas, row[5], grid)
+                     for table, grid in cross_section_grids]
+        for j, wavelength in enumerate(wavelengths):
             absorption, scattering = continuum_opacity(wavelength, gas, ions)
-            line = line_opacity(C_ANGSTROM_S / wavelength, transitions)
+            line = line_opacity(C_ANGSTROM_S / wavelength, transitions) + sum(x[j] for x in molecular)
             yield (index, wavelength, line, absorption, scattering,
                    gas.electron_density, gas.mass_density)
 
@@ -145,6 +150,8 @@ def main():
     parser.add_argument("step", type=float, help="Wavelength spacing in Å")
     parser.add_argument("output", type=Path, help="New opacity CSV")
     parser.add_argument("--vmic", type=float, default=2, help="Microturbulence in km/s")
+    parser.add_argument("--molecular-cross-section", action="append", default=[], metavar="FILE",
+                        help="Add a molecular cross-section JSON or JSON.gz table")
     args = parser.parse_args()
     start, stop, step = args.start, args.stop, args.step
     if (not all(math.isfinite(v) for v in (start, stop, step, args.vmic))
@@ -157,7 +164,8 @@ def main():
         with open(args.composition, encoding="utf-8") as stream:
             config = json.load(stream)
         # Calculate before opening the output so a failed model cannot leave a partial CSV.
-        rows = list(opacities(model, wavelengths, lines, config, args.vmic))
+        tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
+        rows = list(opacities(model, wavelengths, lines, config, args.vmic, cross_sections=tables))
         with args.output.open("x", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
             writer.writerow(("layer", "wavelength_vacuum_A", "line_opacity_cm2_g",
