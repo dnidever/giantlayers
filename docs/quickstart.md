@@ -70,3 +70,33 @@ python3 marcs_writer.py input.mod.gz output.mod
 ```
 
 From Python, call `marcs_writer.write_document(model, path)` with a complete `MarcsDocument`. Supply every table and the abundance pattern for the same physical model. The gray and two-group CSV outputs contain only a subset of the fields required for export.
+
+## Calculate opacities for a custom composition
+
+Install Julia and Korg. This workflow was verified with Korg 0.40.2.
+
+```sh
+julia -e 'using Pkg; Pkg.add(Pkg.PackageSpec(name="Korg", version="0.40.2"))'
+python3 marcs_writer.py model.mod.gz reference.mod
+```
+
+Save a composition as TOML. The optional metal offset is in dex relative to the input atmosphere and applies to every element heavier than helium. Individual values override the shifted values on the absolute abundance scale where hydrogen is 12.
+
+```toml
+metallicity_offset = -0.3
+
+[log_epsilon]
+C = 8.72
+N = 7.92
+O = 8.83
+```
+
+Pass a line-list path and a format supported by Korg, such as `vald` or `turbospectrum`. For the bundled APOGEE DR17 list, use `-` as the path and `apogee-dr17` as the format.
+
+```sh
+julia composition_opacity.jl reference.mod - apogee-dr17 mixture.toml 15570 15585 0.05 2 opacity.csv
+```
+
+The numeric arguments specify the start, stop, and step in vacuum Å, then microturbulence in km/s. The CSV contains line and continuum mass opacity in cm²/g and electron density in cm⁻³ at each wavelength and depth. The Julia API also returns individual species number densities.
+
+Korg recomputes LTE chemical and ionization equilibrium at the reference atmosphere's temperature and number density. The mass opacity conversion uses the reference density. The workflow computes sampled opacities over the requested wavelength window with the structure held fixed.
