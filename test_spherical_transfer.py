@@ -4,7 +4,7 @@ import math
 import unittest
 
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
-from spherical_heating import FormalTransfer, angular_geometry, solve_wavelength
+from spherical_heating import FormalTransfer, angular_geometry, shell_energy_budget, solve_wavelength
 from spherical_transfer import disk_rays, surface_fluxes
 
 
@@ -39,6 +39,13 @@ class TransferChecks(unittest.TestCase):
         )
         self.assertEqual(heating, [0.0] * 4)
         self.assertGreater(iterations, 0)
+
+    def test_shell_heating_accounts_for_spherical_area(self):
+        radii = (3.0, 2.5, 2.0)
+        flux = tuple(10 / (4 * math.pi * r**2) for r in radii)
+        _, shells, mismatch = shell_energy_budget(radii, (1.0,) * 3, flux, (0.0,) * 3)
+        self.assertAlmostEqual(sum(shell[1] for shell in shells), 0.0)
+        self.assertAlmostEqual(mismatch, 0.0)
 
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
