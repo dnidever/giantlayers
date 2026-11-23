@@ -6,6 +6,7 @@ import math
 import sys
 
 from gray_atmosphere import MU, SIGMA
+from opacity_table import OpacityTable
 
 
 def radiation_field(depths, opacity1, opacity2):
@@ -60,7 +61,7 @@ def radiation_field(depths, opacity1, opacity2):
 
 
 def solve(teff, logg, layers=321, tau_bottom=100.0, initial_scale=1.0,
-          strength=1.0, tolerance=1e-9, max_iterations=200):
+          strength=1.0, tolerance=1e-9, max_iterations=200, opacity_table=None):
     """Iterate the temperature, returning the profile and convergence history."""
     k1, k2 = 0.1, 1.0  # cm²/g in the constant-opacity limit
     reference = 2 / (1 / k1 + 1 / k2)
@@ -74,22 +75,27 @@ def solve(teff, logg, layers=321, tau_bottom=100.0, initial_scale=1.0,
     ]
     history = []
     for _ in range(max_iterations):
-        # Bounded opacity response for numerical experiments, with P in cgs.
-        opacity1 = [
-            k1 / reference * math.exp(strength * (
-                0.5 * math.tanh(math.log(t / teff)) + 0.25 * p / (p + 100)
-            ))
-            for t, p in zip(temperature, pressure)
-        ]
-        opacity2 = [k2 / reference] * layers
+        if opacity_table is None:
+            # Bounded opacity response for numerical experiments, with P in cgs.
+            group_opacity = [
+                (k1 * math.exp(strength * (
+                    0.5 * math.tanh(math.log(t / teff)) + 0.25 * p / (p + 100)
+                )), k2)
+                for t, p in zip(temperature, pressure)
+            ]
+        else:
+            group_opacity = [opacity_table(t, p) for t, p in zip(temperature, pressure)]
+        opacity1 = [a / reference for a, _ in group_opacity]
+        opacity2 = [b / reference for _, b in group_opacity]
         source, surface_share = radiation_field(depths, opacity1, opacity2)
         target = [teff * (b / 4)**0.25 for b in source]
         residual = max(abs(new / old - 1) for old, new in zip(temperature, target))
         history.append(residual)
         if residual <= tolerance:
-            rows = list(zip(depths, pressure, temperature,
-                            (reference * ratio for ratio in opacity1),
-                            (k2 for _ in depths)))
+            rows = [
+                (depth, p, t, a, b)
+                for depth, p, t, (a, b) in zip(depths, pressure, temperature, group_opacity)
+            ]
             return rows, history, surface_share
         temperature = [(old + new) / 2 for old, new in zip(temperature, target)]
 
@@ -104,6 +110,8 @@ def main():
     parser.add_argument("--tau-bottom", type=float, default=100)
     parser.add_argument("--initial-scale", type=float, default=1)
     parser.add_argument("--strength", type=float, default=1)
+    parser.add_argument("--opacity-table", metavar="CSV",
+                        help="Read both group opacities from a CSV table")
     args = parser.parse_args()
     positive = (args.teff, args.tau_bottom, args.initial_scale)
     if (not all(math.isfinite(x) and x > 0 for x in positive)
@@ -111,7 +119,12 @@ def main():
             or not 0 <= args.strength <= 2 or args.layers < 2):
         parser.error("Use finite inputs, positive temperature, depth and scale, "
                      "strength between 0 and 2, and at least two layers.")
-    rows, history, surface_share = solve(**vars(args))
+    try:
+        if args.opacity_table is not None:
+            args.opacity_table = OpacityTable(args.opacity_table)
+        rows, history, surface_share = solve(**vars(args))
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     writer = csv.writer(sys.stdout)
     writer.writerow(("tau_reference", "pressure_dyn_cm2", "temperature_K",
                      "group1_opacity_cm2_g", "group2_opacity_cm2_g"))
