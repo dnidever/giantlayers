@@ -100,3 +100,15 @@ The reference MARCS structure supplies the temperature and gas pressure. The sol
 The bundled data cover 1,000–10,000 K and include neutral atoms, first ions, H⁻, and 20 neutral diatomic molecules. Continuum terms include H⁻ bound-free and free-free absorption, hydrogenic H I bound-free absorption, electron–ion free-free absorption, and Thomson scattering. The hydrogenic continuum terms use unit Gaunt factors. Polyatomic and charged molecules other than H⁻, higher ionization stages, metal photoionization, and calculated collisional line damping are future extensions.
 
 [Atomic and diatomic thermochemistry data](https://doi.org/10.1051/0004-6361/201526961) · [H⁻ continuum data in the ATLAS9 HMINOP routine](https://wwwuser.oats.inaf.it/fiorella.castelli/sources/atlas9g/atlas9mem.for) · [APOGEE DR17 line data reference](https://ui.adsabs.harvard.edu/abs/2021AJ....161..254S/abstract)
+
+### Evaluate radiative heating with native opacities
+
+Provide a text file containing increasing vacuum wavelengths in Å. The transfer uses the same grid for all layers and integrates in frequency using trapezoidal weights. Include broad wavelength coverage and enough samples to resolve the lines when interpreting the result as a bolometric energy balance.
+
+```sh
+python3 native_transfer.py model.mod.gz transitions.csv mixture.json wavelengths.txt heating.csv
+```
+
+Add `--adjust-layers 6 --steps 3` to try up to three damped temperature corrections in the outermost six layers. Gas pressure and column mass stay fixed. Each trial recomputes LTE equilibrium, opacity, and transfer, and is accepted only if it reduces the maximum outer-layer net heating relative to thermal emission. Deeper layers supply a fixed lower structure.
+
+The CSV reports initial and corrected temperature, radiative flux, local heating, and integrated cell heating. These corrections are a radiative test on a fixed pressure structure. A converged atmosphere also requires adequate opacity coverage, a flux constraint, and treatment of convective energy transport.
