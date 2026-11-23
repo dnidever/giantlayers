@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import gzip
 from dataclasses import dataclass, replace
 import json
 import math
@@ -9,7 +10,7 @@ from pathlib import Path
 import sys
 
 from lte_chemistry import Thermochemistry
-from lte_opacity import C_ANGSTROM_S, H_EV_S, opacities, read_lines
+from lte_opacity import C_ANGSTROM_S, H_EV_S, layer_opacities, prepare_layers, read_lines
 from marcs_writer import read_document
 from molecular_cross_section import MolecularCrossSection
 from odf_transfer import planck_nu, scattering_ray_flux
@@ -51,56 +52,74 @@ def reference_flux_budget(model, radiative_flux):
         yield convection, total, target, (total - target) / target
 
 
-def spectral_quadrature(wavelengths):
+def read_wavelengths(path):
+    """Read the published MARCS vacuum grid or another plain/gzipped Å grid."""
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="ascii") as stream:
+        return tuple(map(float, stream.read().split()))
+
+
+def spectral_quadrature(wavelengths, coordinate="frequency"):
+    """Return frequency and integration weights for quantities per Hz."""
     if (len(wavelengths) < 2 or not all(math.isfinite(w) and w > 0 for w in wavelengths)
             or any(a >= b for a, b in zip(wavelengths, wavelengths[1:]))):
         raise ValueError("Supply at least two increasing positive vacuum wavelengths")
     frequencies = tuple(C_ANGSTROM_S / w for w in wavelengths)
-    intervals = [a - b for a, b in zip(frequencies, frequencies[1:])]
+    if coordinate == "wavelength":
+        intervals = [b - a for a, b in zip(wavelengths, wavelengths[1:])]
+    elif coordinate == "frequency":
+        intervals = [a - b for a, b in zip(frequencies, frequencies[1:])]
+    else:
+        raise ValueError("Use wavelength or frequency quadrature")
     weights = (intervals[0] / 2,
                *((a + b) / 2 for a, b in zip(intervals, intervals[1:])),
                intervals[-1] / 2)
+    if coordinate == "wavelength":
+        weights = tuple(w * nu / wavelength for w, nu, wavelength in
+                        zip(weights, frequencies, wavelengths))
     return frequencies, weights
 
 
 def evaluate(model, wavelengths, lines, composition, vmic=2.0, chemistry=None,
-             cross_sections=()):
+             cross_sections=(), quadrature="frequency"):
     """Integrate sampled flux and net radiative heating over the supplied grid."""
-    frequency, weights = spectral_quadrature(wavelengths)
+    frequency, weights = spectral_quadrature(wavelengths, quadrature)
     mass = [row[-1] for row in model.thermodynamics]
     temperature = [row[3] for row in model.structure]
     if any(a >= b for a, b in zip(mass, mass[1:])):
         raise ValueError("Column mass must increase inward")
     n_layers = len(mass)
-    rows = iter(opacities(model, wavelengths, lines, composition, vmic, chemistry, cross_sections))
-    # Native opacity yields each depth's wavelengths consecutively.
-    thermal_layers, scattering_layers = [], []
-    for _ in mass:
-        layer = [next(rows) for _ in wavelengths]
-        thermal_layers.append([row[2] + row[3] for row in layer])
-        scattering_layers.append([row[4] for row in layer])
-
+    layers = list(prepare_layers(model, lines, composition, vmic, chemistry))
     totals = [[0.0] * n_layers for _ in range(5)]
-    for j, (nu, weight) in enumerate(zip(frequency, weights)):
-        absorption = [row[j] for row in thermal_layers]
-        scattering = [row[j] for row in scattering_layers]
-        source = [planck_nu(nu, t) for t in temperature]
-        flux, heating, cells = scattering_ray_flux(
-            mass, source, absorption, scattering, diagnostics=True
-        )
-        for i, (f, q, cell, t, b, k) in enumerate(
-            zip(flux, heating, cells, temperature, source, absorption)
-        ):
-            emission = 4 * math.pi * k * b
-            x = H_EV_S * nu / (K_EV * t)
-            derivative = emission * x / (-t * math.expm1(-x))
-            for profile, value in zip(totals, (f, q, cell, emission, derivative)):
-                profile[i] += weight * value
+    # Bound the opacity working set while retaining quadrature weights across
+    # block boundaries. Chemistry is solved only once per atmosphere.
+    block_size = 1024
+    for start in range(0, len(wavelengths), block_size):
+        end = start + block_size
+        sample = wavelengths[start:end]
+        grids = [(table, table.on_grid(sample)) for table in cross_sections]
+        opacities = [list(layer_opacities(layer, sample, grids)) for layer in layers]
+        for columns, nu, weight in zip(zip(*opacities), frequency[start:end], weights[start:end]):
+            absorption = [line + continuum for line, continuum, _ in columns]
+            scattering = [scatter for _, _, scatter in columns]
+            source = [planck_nu(nu, t) for t in temperature]
+            flux, heating, cells = scattering_ray_flux(
+                mass, source, absorption, scattering, diagnostics=True
+            )
+            for i, (f, q, cell, t, b, k) in enumerate(
+                zip(flux, heating, cells, temperature, source, absorption)
+            ):
+                emission = 4 * math.pi * k * b
+                x = H_EV_S * nu / (K_EV * t)
+                derivative = emission * x / (-t * math.expm1(-x))
+                for profile, value in zip(totals, (f, q, cell, emission, derivative)):
+                    profile[i] += weight * value
     return EnergyBalance(*(tuple(profile) for profile in totals))
 
 
 def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
-                         vmic=2.0, flux_guard=False, cross_sections=()):
+                         vmic=2.0, flux_guard=False, cross_sections=(), quadrature="frequency"):
     """Attempt damped corrections at fixed pressure and column mass.
 
     The deeper layers act as a fixed boundary. Recompute chemistry, opacity and
@@ -109,7 +128,7 @@ def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
     if not 1 <= count < len(model.structure) or steps < 1:
         raise ValueError("Select a positive number of outer layers and keep deeper layers fixed")
     chemistry = Thermochemistry()
-    balance = evaluate(model, wavelengths, lines, composition, vmic, chemistry, cross_sections)
+    balance = evaluate(model, wavelengths, lines, composition, vmic, chemistry, cross_sections, quadrature)
     history = [balance.residual(count)]
     surface_error = abs(next(reference_flux_budget(model, balance.flux))[3])
     for _ in range(steps):
@@ -131,7 +150,7 @@ def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
             if not all(chemistry.temperatures[0] <= row[3] <= chemistry.temperatures[-1]
                        for row in structure[:count]):
                 continue
-            trial = evaluate(trial_model, wavelengths, lines, composition, vmic, chemistry, cross_sections)
+            trial = evaluate(trial_model, wavelengths, lines, composition, vmic, chemistry, cross_sections, quadrature)
             residual = trial.residual(count)
             trial_surface_error = abs(next(reference_flux_budget(trial_model, trial.flux))[3])
             if residual < history[-1] and (not flux_guard or trial_surface_error <= surface_error):
@@ -149,7 +168,7 @@ def main():
     parser.add_argument("model", help="Reference MARCS .mod or .mod.gz")
     parser.add_argument("lines", help="Native transition CSV")
     parser.add_argument("composition", help="JSON abundance pattern")
-    parser.add_argument("wavelengths", help="Text file with ascending vacuum wavelengths in Å")
+    parser.add_argument("wavelengths", help="Plain or gzipped text file with ascending vacuum wavelengths in Å")
     parser.add_argument("output", type=Path, help="New energy-balance CSV")
     parser.add_argument("--vmic", type=float, default=2)
     parser.add_argument("--adjust-layers", type=int, default=0)
@@ -158,6 +177,8 @@ def main():
                         help="Reject temperature trials that worsen the surface total-flux error")
     parser.add_argument("--molecular-cross-section", action="append", default=[], metavar="FILE",
                         help="Add a molecular cross-section JSON or JSON.gz table")
+    parser.add_argument("--quadrature", choices=("frequency", "wavelength"), default="frequency",
+                        help="Trapezoid integration coordinate")
     args = parser.parse_args()
     if not math.isfinite(args.vmic) or args.vmic < 0 or args.adjust_layers < 0 or args.steps < 1:
         parser.error("Use nonnegative microturbulence and layer count, and at least one step")
@@ -166,19 +187,20 @@ def main():
         lines = read_lines(args.lines)
         with open(args.composition, encoding="utf-8") as stream:
             composition = json.load(stream)
-        wavelengths = tuple(map(float, Path(args.wavelengths).read_text().split()))
+        wavelengths = read_wavelengths(args.wavelengths)
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
         if args.adjust_layers:
             result, balance, history = correct_temperatures(
                 model, wavelengths, lines, composition, args.adjust_layers, args.steps, args.vmic,
-                flux_guard=args.flux_guard, cross_sections=tables,
+                flux_guard=args.flux_guard, cross_sections=tables, quadrature=args.quadrature,
             )
             print("Outer-layer radiative residual: " + " -> ".join(f"{x:.6g}" for x in history),
                   file=sys.stderr)
             print(f"Accepted temperature corrections: {len(history) - 1}/{args.steps}", file=sys.stderr)
         else:
             result = model
-            balance = evaluate(model, wavelengths, lines, composition, args.vmic, cross_sections=tables)
+            balance = evaluate(model, wavelengths, lines, composition, args.vmic, cross_sections=tables,
+                               quadrature=args.quadrature)
         budget = list(reference_flux_budget(model, balance.flux))
         with args.output.open("x", encoding="utf-8", newline="") as stream:
             writer = csv.writer(stream)
