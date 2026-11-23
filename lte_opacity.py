@@ -1,6 +1,7 @@
 """Native LTE line and continuum mass opacity on a fixed MARCS structure."""
 
 import argparse
+from bisect import bisect_left, bisect_right
 import csv
 from dataclasses import dataclass
 import json
@@ -116,6 +117,32 @@ def line_opacity(frequency, transitions):
     return total
 
 
+def sample_line_opacity(wavelengths, transitions):
+    """Accumulate Doppler lines only where the sampled Gaussian is nonzero."""
+    if not transitions:
+        return [0.0] * len(wavelengths)
+    frequencies = [-C_ANGSTROM_S / wavelength for wavelength in wavelengths]
+    if any(a > b for a, b in zip(frequencies, frequencies[1:])):
+        return [line_opacity(-frequency, transitions) for frequency in frequencies]
+
+    gaussian_scale = math.sqrt(math.log(2) / math.pi)
+    result = [0.0] * len(frequencies)
+    for center, width, mixing, strength in transitions:
+        if mixing:
+            for i, frequency in enumerate(frequencies):
+                result[i] += line_opacity(-frequency, ((center, width, mixing, strength),))
+            continue
+        # Seventeen full widths on either side exceed the exponential
+        # underflow threshold for the Gaussian in double precision.
+        left = bisect_left(frequencies, -center - 17 * width)
+        right = bisect_right(frequencies, -center + 17 * width)
+        for i in range(left, right):
+            displacement = 2 * (-frequencies[i] - center) / width
+            profile = gaussian_scale * math.exp(-math.log(2) * displacement**2)
+            result[i] += 2 * strength / width * profile
+    return result
+
+
 def prepare_layers(model, lines, config, vmic=2.0, chemistry=None):
     """Compute the opacity-independent LTE state once per depth."""
     chemistry = chemistry or Thermochemistry()
@@ -137,9 +164,10 @@ def layer_opacities(layer, wavelengths, cross_section_grids):
     """Sample line absorption, continuum absorption, and scattering for a layer."""
     gas, pressure, ions, transitions = layer
     molecular = [table.mass_opacity(gas, pressure, grid) for table, grid in cross_section_grids]
+    atomic_and_molecular_lines = sample_line_opacity(wavelengths, transitions)
     for j, wavelength in enumerate(wavelengths):
         absorption, scattering = continuum_opacity(wavelength, gas, ions)
-        line = line_opacity(C_ANGSTROM_S / wavelength, transitions) + sum(row[j] for row in molecular)
+        line = atomic_and_molecular_lines[j] + sum(row[j] for row in molecular)
         yield line, absorption, scattering
 
 
