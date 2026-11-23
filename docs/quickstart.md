@@ -60,3 +60,13 @@ GiantLayers uses the MARCS true continuum absorption with ATLAS9 line opacity on
 ### Inspect radiative heating
 
 Add `--heating-output heating.csv` to write the heating profile while keeping the band flux CSV on standard output. The profile includes column mass, local net heating per gram, integrated heating in each depth cell, and net outward radiative flux. A positive heating rate means the matter absorbs more energy than it emits. The diagnostic uses the conservative two-stream solver and prints the closure error between the summed cell heating and the change in radiative flux across the atmosphere.
+
+## Write a MARCS atmosphere file
+
+The exporter writes a complete MARCS model as plain text or gzip. The command below reads an existing model and re-exports its header, 92 elemental abundances, structure, thermodynamics, and partial pressures.
+
+```sh
+python3 marcs_writer.py input.mod.gz output.mod
+```
+
+From Python, call `marcs_writer.write_document(model, path)` with a complete `MarcsDocument`. Supply every table and the abundance pattern for the same physical model. The gray and two-group CSV outputs contain only a subset of the fields required for export.
