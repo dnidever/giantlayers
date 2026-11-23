@@ -182,3 +182,13 @@ python3 spherical_transfer.py model.mod.gz revised-atomic-lines.csv mixture.json
 ```
 
 The CSV contains monochromatic surface fluxes per Hz and frequency weights. The printed spherical ratio normalizes the flux to the MARCS reference radius. The planar ratio uses the corresponding target flux at the outer boundary. Reduce `--stride` and increase `--core-rays` to test sensitivity to the wavelength and ray grids.
+
+### Compute spherical heating with scattering
+
+Use the same spherical model and opacity inputs with the depth-resolved solver. It iterates the isotropic coherent continuum scattering source on the shared impact-parameter rays. Net heating is calculated from true absorption and the difference between the mean intensity and the LTE Planck function. Use `--absorption-only` to isolate the effect of scattering.
+
+```sh
+python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 100 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-heating.csv
+```
+
+The CSV reports the integrated radiative flux and heating at each layer. Standard error reports the maximum scattering iterations and the mismatch between volume-integrated heating and the change in spherical luminosity. This mismatch measures the accuracy of the angular and depth discretization. The MARCS temperature, pressure, and convection profile are held fixed.
