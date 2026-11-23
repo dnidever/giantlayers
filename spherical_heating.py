@@ -137,6 +137,24 @@ def solve_wavelength(rays, radial_widths, density, thermal, absorption, scatteri
     return mean, flux, heating, iterations
 
 
+def shell_energy_budget(radii, density, flux, pointwise_heating):
+    """Return conservative shell heating and a pointwise quadrature diagnostic."""
+    areas = [4 * math.pi * radius**2 for radius in radii]
+    luminosity = [area * f for area, f in zip(areas, flux)]
+    mass_per_radius = [area * rho for area, rho in zip(areas, density)]
+    shells = []
+    pointwise_integral = 0.0
+    for i, (a, b) in enumerate(zip(radii, radii[1:])):
+        left = 0.5 * (a - b) * mass_per_radius[i]
+        right = 0.5 * (a - b) * mass_per_radius[i + 1]
+        net_heating = luminosity[i + 1] - luminosity[i]
+        shells.append((net_heating / (left + right), net_heating))
+        pointwise_integral += left * pointwise_heating[i] + right * pointwise_heating[i + 1]
+    scale = max(map(abs, luminosity))
+    mismatch = pointwise_integral - (luminosity[-1] - luminosity[0])
+    return luminosity, shells, mismatch / scale if scale else 0.0
+
+
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
              include_scattering=True):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
@@ -170,14 +188,8 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
             for i, (local_flux, local_heating) in enumerate(zip(f, q)):
                 flux[i] += weight * local_flux
                 heating[i] += weight * local_heating
-    luminosity = [4 * math.pi * r**2 * f for r, f in zip(radii, flux)]
-    shell_rate = [4 * math.pi * r**2 * rho * q for r, rho, q in zip(radii, density, heating)]
-    integrated = math.fsum(width * (a + b) / 2 for width, a, b in
-                           zip(widths, shell_rate, shell_rate[1:]))
-    closure = integrated - (luminosity[-1] - luminosity[0])
-    scale = max(map(abs, luminosity))
-    relative_closure = closure / scale if scale else 0.0
-    return flux, heating, max_iterations, relative_closure
+    luminosity, shells, mismatch = shell_energy_budget(radii, density, flux, heating)
+    return flux, heating, luminosity, shells, max_iterations, mismatch
 
 
 def main():
@@ -202,7 +214,7 @@ def main():
         with Path(args.composition).open(encoding="utf-8") as stream:
             composition = json.load(stream)
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
-        flux, heating, iterations, closure = evaluate(
+        flux, heating, luminosity, shells, iterations, mismatch = evaluate(
             model, wavelengths, lines, composition, tables,
             args.core_rays, args.vmic, include_scattering=not args.absorption_only,
         )
@@ -211,15 +223,18 @@ def main():
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
     writer.writerow(("layer", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
-                     "heating_erg_g_s", "marcs_convective_flux_erg_cm2_s", "total_flux_erg_cm2_s",
+                     "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",
+                     "shell_to_next_heating_erg_g_s", "shell_to_next_heating_erg_s",
+                     "marcs_convective_flux_erg_cm2_s", "total_flux_erg_cm2_s",
                      "target_flux_erg_cm2_s", "relative_total_flux_error"))
-    for i, (row, thermo, f, q, diagnostic) in enumerate(
-        zip(model.structure, model.thermodynamics, flux, heating, budget), 1
+    for i, (row, thermo, f, q, lum, shell, diagnostic) in enumerate(
+        zip(model.structure, model.thermodynamics, flux, heating, luminosity,
+            [*shells, ("", "")], budget), 1
     ):
-        writer.writerow((i, row[3], thermo[-1], f, q, *diagnostic))
+        writer.writerow((i, row[3], thermo[-1], f, q, lum, *shell, *diagnostic))
     print(f"Surface total-flux error: {budget[0][-1]:+.3%}", file=sys.stderr)
     print(f"Maximum scattering iterations per wavelength: {iterations}", file=sys.stderr)
-    print(f"Relative spherical heating/luminosity mismatch: {closure:+.3e}", file=sys.stderr)
+    print(f"Relative mismatch from trapezoidal integration of pointwise heating: {mismatch:+.3e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
