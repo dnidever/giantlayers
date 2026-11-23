@@ -73,30 +73,30 @@ From Python, call `marcs_writer.write_document(model, path)` with a complete `Ma
 
 ## Calculate opacities for a custom composition
 
-Install Julia and Korg. This workflow was verified with Korg 0.40.2.
+Run the native LTE opacity solver with Python 3.9 or later. It uses the Python standard library and the thermochemistry data included in the checkout.
+
+Save a composition as JSON. The optional metal offset shifts every element heavier than helium in dex relative to the input MARCS atmosphere. Individual values override the shifted abundances on the absolute scale where hydrogen is 12.
+
+```json
+{
+  "metallicity_offset": -0.3,
+  "log_epsilon": {"C": 8.72, "N": 7.92, "O": 8.83}
+}
+```
+
+Supply a transition CSV with vacuum wavelength in Å, species, lower excitation energy in eV, and log gf. Use element symbols for neutral atoms, append `+` for singly ionized atoms, and use formulas such as `CO` for molecules. An optional `damping_s` column supplies the total Lorentz damping rate in s⁻¹. With no damping rate, the profile is Doppler broadened.
+
+```csv
+wavelength_vacuum_A,species,lower_energy_eV,log_gf
+15570.299575,CO,6.996,-6.129123
+```
 
 ```sh
-julia -e 'using Pkg; Pkg.add(Pkg.PackageSpec(name="Korg", version="0.40.2"))'
-python3 marcs_writer.py model.mod.gz reference.mod
+python3 lte_opacity.py model.mod.gz transitions.csv mixture.json 15570 15585 0.05 opacity.csv --vmic 2
 ```
 
-Save a composition as TOML. The optional metal offset is in dex relative to the input atmosphere and applies to every element heavier than helium. Individual values override the shifted values on the absolute abundance scale where hydrogen is 12.
+The reference MARCS structure supplies the temperature and gas pressure. The solver recomputes the mass density, electron density and species populations at each layer. The output contains sampled line absorption, continuum absorption, and continuum scattering in cm²/g. For isotopologue lines, include the isotopic fraction in the oscillator strength used in the transition CSV.
 
-```toml
-metallicity_offset = -0.3
+The bundled data cover 1,000–10,000 K and include neutral atoms, first ions, H⁻, and 20 neutral diatomic molecules. Continuum terms include H⁻ bound-free and free-free absorption, hydrogenic H I bound-free absorption, electron–ion free-free absorption, and Thomson scattering. The hydrogenic continuum terms use unit Gaunt factors. Polyatomic and charged molecules other than H⁻, higher ionization stages, metal photoionization, and calculated collisional line damping are future extensions.
 
-[log_epsilon]
-C = 8.72
-N = 7.92
-O = 8.83
-```
-
-Pass a line-list path and a format supported by Korg, such as `vald` or `turbospectrum`. For the bundled APOGEE DR17 list, use `-` as the path and `apogee-dr17` as the format.
-
-```sh
-julia composition_opacity.jl reference.mod - apogee-dr17 mixture.toml 15570 15585 0.05 2 opacity.csv
-```
-
-The numeric arguments specify the start, stop, and step in vacuum Å, then microturbulence in km/s. The CSV contains line and continuum mass opacity in cm²/g and electron density in cm⁻³ at each wavelength and depth. The Julia API also returns individual species number densities.
-
-Korg recomputes LTE chemical and ionization equilibrium at the reference atmosphere's temperature and number density. The mass opacity conversion uses the reference density. The workflow computes sampled opacities over the requested wavelength window with the structure held fixed.
+[Atomic and diatomic thermochemistry data](https://doi.org/10.1051/0004-6361/201526961) · [H⁻ continuum data in the ATLAS9 HMINOP routine](https://wwwuser.oats.inaf.it/fiorella.castelli/sources/atlas9g/atlas9mem.for) · [APOGEE DR17 line data reference](https://ui.adsabs.harvard.edu/abs/2021AJ....161..254S/abstract)
