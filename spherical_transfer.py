@@ -15,6 +15,16 @@ from native_transfer import read_wavelengths, spectral_quadrature
 from odf_transfer import planck_nu
 
 
+def impact_parameters(radii, core_rays):
+    """Return squared shell radii and ordered ray intersections."""
+    squared = [radius**2 for radius in radii]
+    impacts = [(squared[-1] * i / core_rays, len(radii) - 1, True)
+               for i in range(core_rays + 1)]
+    # Include both limits at the core's edge. A ray just inside receives
+    # bottom-boundary emission, while a ray just outside traverses the shell.
+    impacts.extend((squared[i], i, False) for i in range(len(radii) - 1, -1, -1))
+    return squared, impacts
+
 def disk_rays(radii, core_rays):
     """Build rays and disk weights on a decreasing radial grid.
 
@@ -25,12 +35,7 @@ def disk_rays(radii, core_rays):
             or any(a <= b for a, b in zip(radii, radii[1:])) or core_rays < 2):
         raise ValueError("Use decreasing positive radii and at least two core intervals")
 
-    squared = [radius**2 for radius in radii]
-    impacts = [(squared[-1] * i / core_rays, len(radii) - 1, True)
-               for i in range(core_rays + 1)]
-    # Include both limits at the core's edge. A ray just inside receives
-    # bottom-boundary emission, while a ray just outside traverses the shell.
-    impacts.extend((squared[i], i, False) for i in range(len(radii) - 1, -1, -1))
+    squared, impacts = impact_parameters(radii, core_rays)
     rays = []
     for i, (impact, last, core) in enumerate(impacts):
         left = impact - impacts[i - 1][0] if i else 0
