@@ -4,6 +4,7 @@ import math
 import unittest
 
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
+from spherical_heating import FormalTransfer, angular_geometry, solve_wavelength
 from spherical_transfer import disk_rays, surface_fluxes
 
 
@@ -19,6 +20,25 @@ class TransferChecks(unittest.TestCase):
         rays = disk_rays((1 + 2e-10, 1 + 1e-10, 1), core_rays=12)
         sphere, plane = surface_fluxes((1, 1, 1), (10, 10), rays)
         self.assertTrue(math.isclose(sphere, plane, rel_tol=1e-8))
+
+    def test_tangent_ray_diagonal_matches_source_perturbations(self):
+        rays = angular_geometry((3.0, 2.8, 2.5, 2.0), core_rays=12)
+        thermal = (1.0, 1.3, 2.0, 3.0)
+        field = FormalTransfer(rays, (0.2, 0.5, 0.6), thermal)
+        mean, _ = field.moments(thermal)
+        for i, original in enumerate(mean):
+            changed = list(thermal)
+            changed[i] += 1
+            perturbed, _ = field.moments(changed)
+            self.assertAlmostEqual(perturbed[i] - original, field.diagonal[i], places=12)
+
+    def test_pure_scattering_produces_no_thermal_heating(self):
+        rays = angular_geometry((3.0, 2.8, 2.5, 2.0), core_rays=12)
+        _, _, heating, iterations = solve_wavelength(
+            rays, (0.2, 0.3, 0.5), (1.0,) * 4, (1.0,) * 4, (0.0,) * 4, (1.0,) * 4
+        )
+        self.assertEqual(heating, [0.0] * 4)
+        self.assertGreater(iterations, 0)
 
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
