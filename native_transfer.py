@@ -31,6 +31,25 @@ class EnergyBalance:
         return math.fsum(self.cell_heating) - (self.flux[-1] - self.flux[0])
 
 
+def reference_flux_budget(model, radiative_flux):
+    """Compare against MARCS total flux with its tabulated convection held fixed.
+
+    The reference target scales with radius in spherical MARCS models.
+    GiantLayers' transfer remains plane-parallel in this diagnostic.
+    """
+    surface_flux = float(model.header[2].split()[0])
+    spherical = float(model.header[5].split()[0]) > 0
+    reference_radius = float(model.header[7].split()[0])
+    if len(radiative_flux) != len(model.structure):
+        raise ValueError("Radiative flux must have one value per MARCS layer")
+    for flux, state, thermo in zip(radiative_flux, model.structure, model.thermodynamics):
+        radius = reference_radius - state[2] if spherical else reference_radius
+        target = surface_flux * (reference_radius / radius)**2
+        convection = target * thermo[5]
+        total = flux + convection
+        yield convection, total, target, (total - target) / target
+
+
 def spectral_quadrature(wavelengths):
     if (len(wavelengths) < 2 or not all(math.isfinite(w) and w > 0 for w in wavelengths)
             or any(a >= b for a, b in zip(wavelengths, wavelengths[1:]))):
@@ -78,7 +97,8 @@ def evaluate(model, wavelengths, lines, composition, vmic=2.0, chemistry=None):
     return EnergyBalance(*(tuple(profile) for profile in totals))
 
 
-def correct_temperatures(model, wavelengths, lines, composition, count, steps=1, vmic=2.0):
+def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
+                         vmic=2.0, flux_guard=False):
     """Attempt damped corrections at fixed pressure and column mass.
 
     The deeper layers act as a fixed boundary. Recompute chemistry, opacity and
@@ -89,6 +109,7 @@ def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
     chemistry = Thermochemistry()
     balance = evaluate(model, wavelengths, lines, composition, vmic, chemistry)
     history = [balance.residual(count)]
+    surface_error = abs(next(reference_flux_budget(model, balance.flux))[3])
     for _ in range(steps):
         if history[-1] < 1e-8:
             break
@@ -110,9 +131,11 @@ def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
                 continue
             trial = evaluate(trial_model, wavelengths, lines, composition, vmic, chemistry)
             residual = trial.residual(count)
-            if residual < history[-1]:
+            trial_surface_error = abs(next(reference_flux_budget(trial_model, trial.flux))[3])
+            if residual < history[-1] and (not flux_guard or trial_surface_error <= surface_error):
                 model, balance = trial_model, trial
                 history.append(residual)
+                surface_error = trial_surface_error
                 break
         else:
             break
@@ -129,6 +152,8 @@ def main():
     parser.add_argument("--vmic", type=float, default=2)
     parser.add_argument("--adjust-layers", type=int, default=0)
     parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--flux-guard", action="store_true",
+                        help="Reject temperature trials that worsen the surface total-flux error")
     args = parser.parse_args()
     if not math.isfinite(args.vmic) or args.vmic < 0 or args.adjust_layers < 0 or args.steps < 1:
         parser.error("Use nonnegative microturbulence and layer count, and at least one step")
@@ -140,7 +165,8 @@ def main():
         wavelengths = tuple(map(float, Path(args.wavelengths).read_text().split()))
         if args.adjust_layers:
             result, balance, history = correct_temperatures(
-                model, wavelengths, lines, composition, args.adjust_layers, args.steps, args.vmic
+                model, wavelengths, lines, composition, args.adjust_layers, args.steps, args.vmic,
+                flux_guard=args.flux_guard,
             )
             print("Outer-layer radiative residual: " + " -> ".join(f"{x:.6g}" for x in history),
                   file=sys.stderr)
@@ -148,17 +174,21 @@ def main():
         else:
             result = model
             balance = evaluate(model, wavelengths, lines, composition, args.vmic)
+        budget = list(reference_flux_budget(model, balance.flux))
         with args.output.open("x", encoding="utf-8", newline="") as stream:
             writer = csv.writer(stream)
             writer.writerow(("layer", "column_mass_g_cm2", "initial_temperature_K", "temperature_K",
-                             "radiative_flux_erg_cm2_s", "heating_erg_g_s", "cell_heating_erg_cm2_s"))
-            for i, (thermo, initial, updated, flux, heating, cell) in enumerate(
+                             "radiative_flux_erg_cm2_s", "heating_erg_g_s", "cell_heating_erg_cm2_s",
+                             "marcs_convective_flux_erg_cm2_s", "total_flux_erg_cm2_s",
+                             "target_flux_erg_cm2_s", "relative_total_flux_error"))
+            for i, (thermo, initial, updated, flux, heating, cell, diagnostic) in enumerate(
                 zip(model.thermodynamics, model.structure, result.structure,
-                    balance.flux, balance.heating, balance.cell_heating), 1
+                    balance.flux, balance.heating, balance.cell_heating, budget), 1
             ):
-                writer.writerow((i, thermo[-1], initial[3], updated[3], flux, heating, cell))
+                writer.writerow((i, thermo[-1], initial[3], updated[3], flux, heating, cell, *diagnostic))
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
+    print(f"Surface total-flux error: {budget[0][3]:+.3%}", file=sys.stderr)
     scale = max(map(abs, balance.flux))
     print(f"Relative heating/flux closure error: {abs(balance.closure) / scale:.3e}", file=sys.stderr)
 
