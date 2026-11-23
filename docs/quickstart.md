@@ -150,3 +150,19 @@ python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json
 ```
 
 For expanded optical and infrared coverage, include ExoMol HyVO and Li2015 CO tables on the same grid. If the CO table replaces the explicit CO transitions, remove those transitions from the input CSV. A header-only transition CSV is valid when using cross sections alone. These files add molecular opacity over the common sampled range and inherit the temperature and pressure coverage of the source tables. [VO HyVO](https://exomol.com/data/molecules/VO/51V-16O/HyVO/) · [CO Li2015](https://www.exomol.com/data/molecules/CO/12C-16O/Li2015/)
+
+### Run on the published MARCS wavelength grid
+
+Pass the published vacuum grid directly to native transfer with `--quadrature wavelength`. The reader accepts the original gzip file, and the transfer processes the opacity in wavelength blocks while retaining quadrature weights across block boundaries.
+
+```sh
+python3 native_transfer.py model.mod.gz transitions.csv mixture.json flx_wavelengths.vac.gz full-grid.csv --quadrature wavelength --molecular-cross-section tio.json.gz
+```
+
+To compare coarse startup sampling with the full published grid, pass the same input file to the sampling benchmark. Stride 10 retains every tenth sample and both endpoints. Stride 1 uses all 100,724 wavelengths.
+
+```sh
+python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json.gz --reference-wavelengths flx_wavelengths.vac.gz --strides 10 1 --quadrature wavelength > marcs-sampling.csv
+```
+
+Use the native-resolution opacity tables when comparing the grids. The transfer evaluates the available opacities at the MARCS sample positions. This matches the published wavelength axis and the wavelength integration convention. The geometry, opacity inventory, and convection model also affect how closely the calculated atmosphere reproduces MARCS. [MARCS wavelength download](https://marcs.astro.uu.se/docs.html) · [MARCS methods](https://arxiv.org/abs/0805.0554)
