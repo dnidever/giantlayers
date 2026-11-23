@@ -1,5 +1,6 @@
 """Interpolate portable molecular cross-section tables without external packages."""
 
+from array import array
 from bisect import bisect_right
 import gzip
 import json
@@ -37,13 +38,14 @@ class MolecularCrossSection:
         self.pressures = _axis(data["pressure_dyn_cm2"], "Pressure axis")
         self.log_pressures = tuple(map(math.log, self.pressures))
         self.wavelengths = _axis(data["wavelength_vacuum_A"], "Wavelength axis")
-        self.cross_sections = data["cross_section_cm2"]
-        if (len(self.cross_sections) != len(self.temperatures)
-                or any(len(layer) != len(self.pressures) for layer in self.cross_sections)
+        sections = data["cross_section_cm2"]
+        if (len(sections) != len(self.temperatures)
+                or any(len(layer) != len(self.pressures) for layer in sections)
                 or any(len(row) != len(self.wavelengths)
                        or not all(math.isfinite(value) and value >= 0 for value in row)
-                       for layer in self.cross_sections for row in layer)):
+                       for layer in sections for row in layer)):
             raise ValueError("Cross sections must be a complete nonnegative T × P × wavelength grid")
+        self.cross_sections = tuple(tuple(array("d", row) for row in layer) for layer in sections)
 
     def on_grid(self, wavelengths):
         """Precompute wavelength interpolation for a transfer grid."""
@@ -63,8 +65,8 @@ class MolecularCrossSection:
         it, ft = _bracket(self.temperatures, gas.temperature)
         ip, fp = _bracket(self.log_pressures, math.log(pressure))
         table = self.cross_sections
-        rows = (table[it][ip], table[it][ip + 1], table[it + 1][ip], table[it + 1][ip + 1])
-        weights = ((1-ft)*(1-fp), (1-ft)*fp, ft*(1-fp), ft*fp)
+        a, b, c, d = table[it][ip], table[it][ip + 1], table[it + 1][ip], table[it + 1][ip + 1]
+        wa, wb, wc, wd = (1-ft)*(1-fp), (1-ft)*fp, ft*(1-fp), ft*fp
         abundance = density * self.isotope_fraction / gas.mass_density
         result = []
         for point in grid:
@@ -72,7 +74,8 @@ class MolecularCrossSection:
                 result.append(0.0)
                 continue
             i, fw = point
-            opacity = sum(weight * (row[i] + fw*(row[i + 1] - row[i]))
-                          for row, weight in zip(rows, weights))
-            result.append(abundance * opacity)
+            left = wa*a[i] + wb*b[i] + wc*c[i] + wd*d[i]
+            j = i + 1
+            right = wa*a[j] + wb*b[j] + wc*c[j] + wd*d[j]
+            result.append(abundance * ((1 - fw) * left + fw * right))
         return result
