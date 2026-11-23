@@ -8,6 +8,7 @@ import sys
 from atlas9_odf import Atlas9ODF, C_NM_PER_S, LOG_P, quadrature
 from gray_atmosphere import MU, SIGMA, propagate, solve as gray_atmosphere
 import hminus
+from marcs_model import read_model
 
 PLANCK = 6.62607015e-27  # erg s
 BOLTZMANN = 1.380649e-16  # erg/K
@@ -41,12 +42,23 @@ def ray_flux(column_mass, source, opacity):
     return flux
 
 
-def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False):
+def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False, model=None):
     """Return the band-integrated surface fluxes and total flux versus depth."""
-    profile = list(gray_atmosphere(teff, logg, continuum, layers, tau_bottom))
-    mass = [row[1] for row in profile]
-    temperature = [row[2] for row in profile]
-    pressure = [row[3] for row in profile]
+    gas = None
+    if model is None:
+        profile = list(gray_atmosphere(teff, logg, continuum, layers, tau_bottom))
+        mass = [row[1] for row in profile]
+        temperature = [row[2] for row in profile]
+        pressure = [row[3] for row in profile]
+        if include_hminus:
+            gas = [hminus.estimate_gas_state(t, p) for t, p in zip(temperature, pressure)]
+    else:
+        mass = [layer.column_mass for layer in model.layers]
+        temperature = [layer.temperature for layer in model.layers]
+        pressure = [layer.gas_pressure for layer in model.layers]
+        layers = len(mass)
+        if include_hminus:
+            gas = [(layer.electron_density, layer.neutral_h_per_gram) for layer in model.layers]
 
     line_columns = None
     if odf is not None:
@@ -56,7 +68,6 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
             for t, p in zip(temperature, pressure)
         )))
 
-    gas = [hminus.estimate_gas_state(t, p) for t, p in zip(temperature, pressure)] if include_hminus else None
     bands = []
     total_flux = [0.0] * layers
     for band, (short, long, weights) in enumerate(quadrature()):
@@ -100,6 +111,8 @@ def main():
                         help="Skip line opacity for comparison")
     parser.add_argument("--hminus", action="store_true",
                         help="Add LTE H⁻ absorption to the constant continuum")
+    parser.add_argument("--marcs-model", metavar="FILE",
+                        help="Use a fixed MARCS .mod or .mod.gz profile with plane-parallel transfer")
     args = parser.parse_args()
     positive = (args.teff, args.continuum, args.tau_bottom)
     if (not all(math.isfinite(x) and x > 0 for x in positive)
@@ -108,14 +121,15 @@ def main():
                      "finite logg, and at least two layers.")
     try:
         odf = None if args.continuum_only else Atlas9ODF(args.odf)
+        model = read_model(args.marcs_model) if args.marcs_model else None
         bands, flux = solve(odf, args.teff, args.logg, args.continuum,
-                            args.layers, args.tau_bottom, include_hminus=args.hminus)
+                            args.layers, args.tau_bottom, include_hminus=args.hminus, model=model)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
     writer.writerow(("wavelength_min_nm", "wavelength_max_nm", "surface_flux_erg_cm2_s"))
     writer.writerows(bands)
-    reference = SIGMA * args.teff**4
+    reference = SIGMA * (model.teff if model else args.teff)**4
     print(f"Bolometric surface flux / (sigma Teff^4): {flux[0] / reference:.6f}",
           file=sys.stderr)
     print(f"Maximum relative flux residual through the fixed atmosphere: "
