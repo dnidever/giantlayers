@@ -99,10 +99,12 @@ class Thermochemistry:
             nuclei = data["atoms"]
             q[name] = partition(data["q"])
             masses[name] = sum(masses[e] for e in nuclei)
+            if temperature > data.get("maximum_formation_temperature", math.inf):
+                continue
             kp = data["log10_kp_cgs"]
             log_kp = (1 - inverse_fraction) * kp[index] + inverse_fraction * kp[index + 1]
             powers = tuple((indices[e], n) for e, n in Counter(nuclei).items())
-            add(name, nuclei, powers, math.log(kt) - math.log(10) * log_kp)
+            add(name, nuclei, powers, (len(nuclei) - 1) * math.log(kt) - math.log(10) * log_kp)
 
         h = indices["H"]
         # LTE attachment of H + e, with ground-state H and H⁻ weights 2 and 1.
@@ -148,7 +150,8 @@ class Thermochemistry:
             residual, jacobian, populations = system(x)
             error = max(map(abs, residual))
             if error < tolerance:
-                numbers = {entry[0]: n for entry, n in zip(species, populations)}
+                numbers = dict.fromkeys(q, 0.0)
+                numbers.update((entry[0], n) for entry, n in zip(species, populations))
                 density = math.exp(x[-1]) * AMU * math.fsum(
                     ratio * masses[e] for ratio, e in zip(ratios, elements)
                 )
