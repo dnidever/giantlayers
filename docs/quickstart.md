@@ -26,3 +26,21 @@ The program prints maximum relative flux and hydrostatic residuals to standard e
 ```sh
 python3 gray_atmosphere.py --help
 ```
+
+## Run with a two-group opacity table
+
+The nonlinear prototype can read both mass opacities from a CSV file.
+
+```sh
+python3 nonlinear_atmosphere.py --opacity-table opacities.csv > atmosphere.csv
+```
+
+Use the following header and provide one row for each temperature–pressure pair on a complete rectangular grid with at least two values on each axis. All input values must be positive and finite. Opacities are in cm²/g.
+
+```csv
+temperature_K,pressure_dyn_cm2,group1_opacity_cm2_g,group2_opacity_cm2_g
+```
+
+The solver interpolates in log temperature, log pressure, and log opacity. Pressures below the lowest grid point, including the vacuum surface, use the lowest-pressure row. A temperature outside the table or a pressure above its upper limit stops the run. Make sure the table covers the temperatures encountered during iteration as well as the final profile.
+
+The two groups retain equal Planck weights. Tables supplied here should contain the group means appropriate to that simplified model.
