@@ -9,6 +9,7 @@ from atlas9_odf import Atlas9ODF, C_NM_PER_S, LOG_P, quadrature
 from gray_atmosphere import MU, SIGMA, propagate, solve as gray_atmosphere
 import hminus
 from marcs_model import read_model
+from marcs_opacity import MarcsOpacity
 
 PLANCK = 6.62607015e-27  # erg s
 BOLTZMANN = 1.380649e-16  # erg/K
@@ -22,7 +23,7 @@ def planck_nu(frequency, temperature):
     return 2 * PLANCK * frequency**3 / (LIGHT**2 * math.expm1(exponent))
 
 
-def ray_flux(column_mass, source, opacity):
+def ray_flux(column_mass, source, opacity, thermal_bottom=False):
     """Return net two-stream flux density at each depth."""
     distances = [
         (right - left) * (a + b) / (2 * MU)
@@ -30,7 +31,9 @@ def ray_flux(column_mass, source, opacity):
     ]
     outgoing = [0.0] * len(source)
     # At the base use B + mu * dB/dtau, estimated from the last cell.
-    outgoing[-1] = source[-1] + (source[-1] - source[-2]) / distances[-1]
+    outgoing[-1] = source[-1]
+    if not thermal_bottom or (sum(distances) >= 10 and distances[-1] > 0):
+        outgoing[-1] += (source[-1] - source[-2]) / distances[-1]
     for i in range(len(source) - 2, -1, -1):
         outgoing[i] = propagate(outgoing[i + 1], source[i + 1], source[i], distances[i])
 
@@ -42,8 +45,12 @@ def ray_flux(column_mass, source, opacity):
     return flux
 
 
-def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False, model=None):
+def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hminus=False, model=None, tabulated_continuum=None):
     """Return the band-integrated surface fluxes and total flux versus depth."""
+    if tabulated_continuum is not None:
+        if model is None or include_hminus:
+            raise ValueError("Tabulated continuum requires a MARCS model and already includes H⁻")
+        tabulated_continuum.check_profile(model)
     gas = None
     if model is None:
         profile = list(gray_atmosphere(teff, logg, continuum, layers, tau_bottom))
@@ -74,7 +81,12 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
         frequency = 0.5 * C_NM_PER_S * (1 / short + 1 / long)
         source = [planck_nu(frequency, t) for t in temperature]
         continuum_opacity = [continuum] * layers
-        if gas is not None:
+        if tabulated_continuum is not None:
+            wavelength = C_NM_PER_S / frequency
+            continuum_opacity = [
+                absorption for absorption, _ in tabulated_continuum.at_wavelength(wavelength)
+            ]
+        elif gas is not None:
             wavelength = C_NM_PER_S / frequency
             continuum_opacity = [
                 continuum + sum(hminus.mass_opacity(wavelength, t, ne, hydrogen))
@@ -90,7 +102,8 @@ def solve(odf, teff, logg, continuum, layers=161, tau_bottom=100.0, include_hmin
             )
         surface_flux = 0.0
         for opacity, weight in zip(ranked_opacities, weights):
-            flux = ray_flux(mass, source, opacity)
+            flux = ray_flux(mass, source, opacity,
+                            thermal_bottom=tabulated_continuum is not None)
             surface_flux += weight * flux[0]
             for i, value in enumerate(flux):
                 total_flux[i] += weight * value
@@ -113,6 +126,8 @@ def main():
                         help="Add LTE H⁻ absorption to the constant continuum")
     parser.add_argument("--marcs-model", metavar="FILE",
                         help="Use a fixed MARCS .mod or .mod.gz profile with plane-parallel transfer")
+    parser.add_argument("--marcs-continuum", metavar="FILE",
+                        help="Use true absorption from a matching MARCS .opa or .opa.gz")
     args = parser.parse_args()
     positive = (args.teff, args.continuum, args.tau_bottom)
     if (not all(math.isfinite(x) and x > 0 for x in positive)
@@ -122,8 +137,10 @@ def main():
     try:
         odf = None if args.continuum_only else Atlas9ODF(args.odf)
         model = read_model(args.marcs_model) if args.marcs_model else None
+        tabulated = MarcsOpacity(args.marcs_continuum) if args.marcs_continuum else None
         bands, flux = solve(odf, args.teff, args.logg, args.continuum,
-                            args.layers, args.tau_bottom, include_hminus=args.hminus, model=model)
+                            args.layers, args.tau_bottom, include_hminus=args.hminus, model=model,
+                            tabulated_continuum=tabulated)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
