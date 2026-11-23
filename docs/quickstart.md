@@ -166,3 +166,19 @@ python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json
 ```
 
 Use the native-resolution opacity tables when comparing the grids. The transfer evaluates the available opacities at the MARCS sample positions. This matches the published wavelength axis and the wavelength integration convention. The geometry, opacity inventory, and convection model also affect how closely the calculated atmosphere reproduces MARCS. [MARCS wavelength download](https://marcs.astro.uu.se/docs.html) · [MARCS methods](https://arxiv.org/abs/0805.0554)
+
+### Compare spherical and plane-parallel surface transfer
+
+Convert the published MARCS oscillator-strength revisions from VALD air wavelengths into the native vacuum-wavelength transition format. These files provide a subset of the atomic lines used by MARCS. The converted transitions use Doppler broadening. [MARCS auxiliary atomic data](https://marcs.astro.uu.se/docs.html#Auxiliary)
+
+```sh
+python3 marcs_atomic_lines.py astroph_gfVALD1.dat astroph_gfVALD2.dat > revised-atomic-lines.csv
+```
+
+Use a spherical model and the same opacity inputs to compare surface transfer in both geometries. Pass several `--molecular-cross-section` options to include multiple absorbers. The spherical solver traces rays through atmospheric shells and integrates the emergent intensity over the apparent disk. The plane-parallel case uses the same surface angles and quadrature weights. Both modes use LTE true absorption and fixed temperatures and gas pressures for this benchmark.
+
+```sh
+python3 spherical_transfer.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 50 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-comparison.csv
+```
+
+The CSV contains monochromatic surface fluxes per Hz and frequency weights. The printed spherical ratio normalizes the flux to the MARCS reference radius. The planar ratio uses the corresponding target flux at the outer boundary. Reduce `--stride` and increase `--core-rays` to test sensitivity to the wavelength and ray grids.
