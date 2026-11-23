@@ -15,3 +15,12 @@ python3 gray_atmosphere.py --teff 4300 --logg 1.5 > atmosphere.csv
 The CSV contains optical depth, column mass, temperature, gas pressure, radiative flux, and relative flux residual. The program prints the maximum relative flux and hydrostatic residuals to standard error. Run with `--help` for the grid and opacity options.
 
 The prototype is a numerical benchmark for future frequency-dependent opacity, convection, and spherical geometry.
+
+## Documentation
+
+See the [documentation source](docs/index.md) for a quickstart and the model assumptions. To preview the site locally, install the documentation dependencies and run MkDocs.
+
+```sh
+python3 -m pip install -r docs/requirements.txt
+python3 -m mkdocs serve
+```
