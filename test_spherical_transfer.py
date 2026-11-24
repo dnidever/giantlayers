@@ -70,6 +70,25 @@ class TransferChecks(unittest.TestCase):
             self.assertAlmostEqual(row[3], expected)
         self.assertEqual(corrected.structure[-1], model.structure[-1])
 
+    def test_absolute_luminosity_uses_independent_photospheric_mode(self):
+        header = ("", "3500", "1", "", "", "", "", "1")
+        structure = ((-4, 0, 0, 3000), (0, 0, 0, 3500), (2, 0, 0, 5000))
+        model = MarcsDocument(header, (), structure, ((0,) * 7,) * 3, ())
+        desired = (3040, 3450, 5000)
+
+        def linear_transfer(trial, *args):
+            return None, None, [
+                4 * math.pi * (1 + 1e-4 * (row[3] - target))
+                for row, target in zip(trial.structure, desired)
+            ]
+
+        with patch("spherical_heating.evaluate", side_effect=linear_transfer):
+            updated, _, history = correct_temperatures(model, (), (), {}, 1, luminosity_target=True)
+        self.assertLess(history[-1][0], 1e-12)
+        self.assertLess(abs(history[-1][1]), 1e-12)
+        for row, expected in zip(updated.structure, desired):
+            self.assertAlmostEqual(row[3], expected)
+
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
         transitions = (
