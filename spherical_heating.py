@@ -16,6 +16,7 @@ from marcs_writer import read_document
 from molecular_cross_section import MolecularCrossSection
 from native_transfer import read_wavelengths, reference_flux_budget, spectral_quadrature
 from odf_transfer import planck_nu
+from spherical_hydrostatic import reconstruct_for_transfer
 from spherical_kernel import CompiledKernel
 from spherical_transfer import disk_rays, impact_parameters
 
@@ -294,11 +295,15 @@ def main():
                         help="Reevaluate the accepted profile on the full input wavelength grid")
     parser.add_argument("--kernel", type=Path,
                         help="Optional shared library compiled from spherical_kernel.c")
+    parser.add_argument("--hydrostatic", action="store_true",
+                        help="Reconstruct hydrostatic pressure and radius before fixed-temperature transfer")
     args = parser.parse_args()
     if not math.isfinite(args.vmic) or args.vmic < 0 or args.adjust_layers < 0 or args.steps < 1:
         parser.error("Use nonnegative microturbulence and layer count, and at least one step")
     if (args.luminosity_target or args.verify_full) and not args.adjust_layers:
         parser.error("--luminosity-target and --verify-full require --adjust-layers")
+    if args.hydrostatic and args.adjust_layers:
+        parser.error("--hydrostatic runs a fixed-temperature comparison")
     try:
         model = read_document(args.model)
         reference = read_wavelengths(args.wavelengths)
@@ -308,6 +313,10 @@ def main():
             composition = json.load(stream)
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
         initial = model
+        if args.hydrostatic:
+            model, solution = reconstruct_for_transfer(model, mixture=composition)
+            print(f"Hydrostatic iterations: {solution.iterations}; "
+                  f"relative cell pressure residual: {solution.pressure_residual:.3e}", file=sys.stderr)
         if args.adjust_layers:
             model, result, history = correct_temperatures(
                 model, wavelengths, lines, composition, args.adjust_layers, args.steps,
