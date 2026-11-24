@@ -1,7 +1,9 @@
 """Analytic checks for the spherical formal transfer and sampled line kernels."""
 
+from dataclasses import replace
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
@@ -88,6 +90,34 @@ class TransferChecks(unittest.TestCase):
         self.assertLess(abs(history[-1][1]), 1e-12)
         for row, expected in zip(updated.structure, desired):
             self.assertAlmostEqual(row[3], expected)
+
+    def test_temperature_trials_reuse_the_original_hydrostatic_boundary(self):
+        header = ("", "3500", "1", "", "", "", "", "1")
+        structure = ((-4, 0, 0, 3000, 0, 1), (0, 0, 0, 3500, 0, 1))
+        model = MarcsDocument(header, (), structure, ((0,) * 7,) * 2, ())
+        boundary = SimpleNamespace(reference_radius=1)
+        pressures = []
+
+        def reconstruct(trial, *, boundary):
+            self.assertIs(boundary, original_boundary)
+            rows = tuple((*row[:5], row[3] / 100) for row in trial.structure)
+            return replace(trial, structure=rows), None
+
+        def linear_transfer(trial, *args):
+            pressure = trial.structure[0][5]
+            pressures.append(pressure)
+            return None, None, [4 * math.pi * pressure / 30.5, 4 * math.pi]
+
+        original_boundary = boundary
+        with patch("spherical_heating.boundary_from_marcs", return_value=(boundary, None)) as grid:
+            with patch("spherical_heating.reconstruct_for_transfer", side_effect=reconstruct):
+                with patch("spherical_heating.evaluate", side_effect=linear_transfer):
+                    updated, _, history = correct_temperatures(model, (), (), {}, 1, hydrostatic=True)
+        grid.assert_called_once()
+        self.assertGreater(len(set(pressures)), 2)
+        self.assertAlmostEqual(updated.structure[0][3], 3050)
+        self.assertAlmostEqual(updated.structure[0][5], 30.5)
+        self.assertLess(history[-1][0], 1e-12)
 
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
