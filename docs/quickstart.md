@@ -227,3 +227,13 @@ The Python `solve` function also accepts a radial column-mass grid and boundary 
 Add `--hydrostatic` to the spherical heating command to rebuild pressure, electron pressure, density, and radii before evaluating transfer. The reconstruction and transfer use the same input abundance pattern. The temperatures and reference convective fractions stay fixed. Run the command with and without the option using identical wavelength, line, and cross-section inputs to isolate the effect of hydrostatic reconstruction.
 
 The reconstructed CSV reports radial column mass measured from the upper boundary. The original comparison reports the model's published column mass. Match rows by layer index. The reconstructed radius at Rosseland depth one follows the input mass and gravity, so its reference luminosity normalization uses that radius.
+
+### Couple the hydrostatic and temperature updates
+
+Combine `--hydrostatic` with `--adjust-layers` to solve hydrostatic balance before each temperature trial, including the finite-difference perturbations and the line-search evaluations. The original radial mass grid, surface gas pressure, stellar mass, and gravity define the boundary throughout the run. Each trial recomputes pressure, electron pressure, density, radius, opacities, and scattering. With `--luminosity-target`, it also fits the target at the reconstructed reference radius.
+
+```sh
+python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --adjust-layers 3 --steps 2 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-trial.csv
+```
+
+The output includes the updated temperatures and hydrostatic structure. The Rosseland layer labels and convective luminosity fractions are carried over from MARCS for this benchmark.
