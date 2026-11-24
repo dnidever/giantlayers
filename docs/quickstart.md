@@ -209,3 +209,15 @@ With a coarse startup stride, `--verify-full` reevaluates the accepted profile o
 cc -O3 -std=c99 -shared -fPIC spherical_kernel.c -o spherical_kernel.so -lm
 python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 400 --adjust-layers 3 --steps 5 --luminosity-target --verify-full --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > luminosity-check.csv
 ```
+
+### Solve pressure and radius on a fixed temperature profile
+
+Run the spherical hydrostatic benchmark on a MARCS reference model.
+
+```sh
+python3 spherical_hydrostatic.py model.mod.gz > hydrostatic.csv
+```
+
+The benchmark takes the temperature, composition, and outer gas pressure from MARCS. It integrates the published density over radial distance to define a comparison column-mass grid. GiantLayers then computes its own gas pressure, density, and radius at each depth using spherical gravity and its native LTE equation of state. The reference radius is set by the input mass and gravity at the layer with Rosseland optical depth one. This version solves gas-pressure balance. Radiation and turbulent pressure are outside that equation.
+
+The Python `solve` function also accepts a radial column-mass grid and boundary values supplied independently of MARCS.
