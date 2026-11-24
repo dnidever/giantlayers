@@ -2,9 +2,12 @@
 
 import math
 import unittest
+from unittest.mock import patch
 
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
-from spherical_heating import FormalTransfer, angular_geometry, shell_energy_budget, solve_wavelength
+from marcs_writer import MarcsDocument
+from spherical_heating import (FormalTransfer, angular_geometry, correct_temperatures,
+                               shell_energy_budget, solve_wavelength)
 from spherical_transfer import disk_rays, surface_fluxes
 
 
@@ -46,6 +49,26 @@ class TransferChecks(unittest.TestCase):
         _, shells, mismatch = shell_energy_budget(radii, (1.0,) * 3, flux, (0.0,) * 3)
         self.assertAlmostEqual(sum(shell[1] for shell in shells), 0.0)
         self.assertAlmostEqual(mismatch, 0.0)
+
+    def test_temperature_step_reduces_shell_luminosity_residual(self):
+        header = ("", "", "1", "", "", "", "", "1")
+        structure = tuple((0, 0, 0, t) for t in (3000, 3100, 3200))
+        model = MarcsDocument(header, (), structure, ((0,) * 7,) * 3, ())
+        targets = (3050, 3150, 3200)
+
+        def linear_transfer(trial, *args):
+            luminosity = [
+                4 * math.pi * (1 + (row[3] - expected) * 1e-4)
+                for row, expected in zip(trial.structure, targets)
+            ]
+            return None, None, luminosity
+
+        with patch("spherical_heating.evaluate", side_effect=linear_transfer):
+            corrected, _, history = correct_temperatures(model, (), (), {}, 2)
+        self.assertLess(history[-1][0], 1e-12)
+        for row, expected in zip(corrected.structure, targets):
+            self.assertAlmostEqual(row[3], expected)
+        self.assertEqual(corrected.structure[-1], model.structure[-1])
 
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
