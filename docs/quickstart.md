@@ -237,3 +237,13 @@ python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json 
 ```
 
 The output includes the updated temperatures and hydrostatic structure. The Rosseland layer labels and convective luminosity fractions are carried over from MARCS for this benchmark.
+
+### Calculate mixing-length convection
+
+Run the Henyey mixing-length calculation on the fiducial pressure and temperature profile. GiantLayers computes the logarithmic temperature gradient, estimates the heat capacity and thermal expansion from its native LTE chemistry, and reports the convective velocity and flux beside the MARCS values. The default benchmark uses the published MARCS Rosseland opacities to isolate the convection calculation. [MARCS mixing-length equations](https://arxiv.org/abs/0805.0554)
+
+```sh
+python3 mixing_length.py model.mod.gz > convection.csv
+```
+
+Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from GiantLayers opacities. Add the atomic transition list with `--lines` and molecular tables with repeatable `--molecular-cross-section` arguments. Use `--hydrostatic` to evaluate convection on the reconstructed pressure and radius profile. These commands diagnose convection on a fixed temperature structure.
