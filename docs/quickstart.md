@@ -221,3 +221,9 @@ python3 spherical_hydrostatic.py model.mod.gz > hydrostatic.csv
 The benchmark takes the temperature, composition, and outer gas pressure from MARCS. It integrates the published density over radial distance to define a comparison column-mass grid. GiantLayers then computes its own gas pressure, density, and radius at each depth using spherical gravity and its native LTE equation of state. The reference radius is set by the input mass and gravity at the layer with Rosseland optical depth one. This version solves gas-pressure balance. Radiation and turbulent pressure are outside that equation.
 
 The Python `solve` function also accepts a radial column-mass grid and boundary values supplied independently of MARCS.
+
+### Compare transfer after hydrostatic reconstruction
+
+Add `--hydrostatic` to the spherical heating command to rebuild pressure, electron pressure, density, and radii before evaluating transfer. The reconstruction and transfer use the same input abundance pattern. The temperatures and reference convective fractions stay fixed. Run the command with and without the option using identical wavelength, line, and cross-section inputs to isolate the effect of hydrostatic reconstruction.
+
+The reconstructed CSV reports radial column mass measured from the upper boundary. The original comparison reports the model's published column mass. Match rows by layer index. The reconstructed radius at Rosseland depth one follows the input mass and gravity, so its reference luminosity normalization uses that radius.
