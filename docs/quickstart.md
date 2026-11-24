@@ -192,3 +192,9 @@ python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json 
 ```
 
 The CSV reports integrated radiative flux, luminosity, and pointwise true-absorption heating at each layer. The shell columns give the mean net heating and energy gain between the current layer and the next deeper layer, calculated from the luminosity difference and shell mass. Positive heating means the gas gains energy. The shell values balance the luminosity change by construction. Standard error reports how far a separate trapezoidal integration of the pointwise rates departs from that budget. Use that difference to assess whether pointwise heating is suitable for a temperature update. The MARCS temperature, pressure, and convection profiles are held fixed.
+
+### Try spherical temperature corrections
+
+Add `--adjust-layers 3 --steps 2` to the spherical heating command to try two damped temperature corrections in the outer three layers. Each trial recomputes LTE chemistry, opacities, and spherical scattering. The correction uses finite differences to reduce the change in radiative plus convective luminosity across the selected shells. The deeper temperature profile, radii, gas pressure and published MARCS convective contribution stay fixed.
+
+The solver reports the maximum outer-shell luminosity residual and the surface total-flux error separately. The correction targets local shell balance. Fitting the absolute emergent flux requires a separate constraint. The CSV includes the initial and corrected temperature.
