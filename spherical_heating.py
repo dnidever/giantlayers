@@ -2,7 +2,7 @@
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -10,6 +10,7 @@ import sys
 
 from benchmark_sampling import nested_wavelengths
 from gray_atmosphere import propagate
+from lte_chemistry import Thermochemistry, _linear_solve
 from lte_opacity import layer_opacities, prepare_layers, read_lines
 from marcs_writer import read_document
 from molecular_cross_section import MolecularCrossSection
@@ -156,7 +157,7 @@ def shell_energy_budget(radii, density, flux, pointwise_heating):
 
 
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
-             include_scattering=True):
+             include_scattering=True, chemistry=None):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
@@ -165,7 +166,7 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     rays = angular_geometry(radii, core_rays)
     widths = [a - b for a, b in zip(radii, radii[1:])]
     frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
-    layers = list(prepare_layers(model, lines, composition, vmic))
+    layers = list(prepare_layers(model, lines, composition, vmic, chemistry))
     temperatures = [layer[0].temperature for layer in layers]
     density = [layer[0].mass_density for layer in layers]
     flux = [0.0] * len(layers)
@@ -192,6 +193,63 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     return flux, heating, luminosity, shells, max_iterations, mismatch
 
 
+def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
+                         tables=(), core_rays=12, vmic=2.0, include_scattering=True):
+    """Reduce outer-shell total luminosity divergence at fixed gas pressure."""
+    if not 1 <= count < len(model.structure) or steps < 1:
+        raise ValueError("Select outer layers to adjust and leave at least one deeper layer fixed")
+    chemistry = Thermochemistry()
+    reference_radius = float(model.header[7].split()[0])
+    target = 4 * math.pi * reference_radius**2 * float(model.header[2].split()[0])
+    convection = [target * row[5] for row in model.thermodynamics]
+    baseline = model.structure
+
+    def trial(temperatures):
+        structure = tuple((*row[:3], t, *row[4:])
+                          for row, t in zip(baseline, temperatures)) + baseline[count:]
+        current = replace(model, structure=structure)
+        result = evaluate(current, wavelengths, lines, composition, tables, core_rays,
+                          vmic, include_scattering, chemistry)
+        luminosity = [r + c for r, c in zip(result[2], convection)]
+        residual = [(b - a) / target for a, b in zip(luminosity[:count], luminosity[1:count+1])]
+        surface = luminosity[0] / target - 1
+        return current, result, residual, surface
+
+    temperatures = [row[3] for row in baseline[:count]]
+    current, result, residual, surface = trial(temperatures)
+    history = [(max(map(abs, residual)), surface)]
+    for _ in range(steps):
+        if history[-1][0] < 1e-8:
+            break
+        columns = []
+        for i, value in enumerate(temperatures):
+            delta = 0.001 * value
+            if value + delta > chemistry.temperatures[-1]:
+                delta = -delta
+            perturbed = temperatures.copy()
+            perturbed[i] += delta
+            shifted = trial(perturbed)[2]
+            columns.append([(b - a) / delta for a, b in zip(residual, shifted)])
+        direction = _linear_solve([list(row) for row in zip(*columns)], [-x for x in residual])
+        # Keep the Newton direction and cap the largest fractional change.
+        fractional = max(abs(d) / t for d, t in zip(direction, temperatures))
+        scale = min(1.0, 0.03 / fractional) if fractional else 1.0
+        for _ in range(8):
+            candidate = [t + scale * d for t, d in zip(temperatures, direction)]
+            if all(chemistry.temperatures[0] <= t <= chemistry.temperatures[-1] for t in candidate):
+                new_model, new_result, new_residual, new_surface = trial(candidate)
+                worst = max(map(abs, new_residual))
+                if worst < history[-1][0]:
+                    temperatures = candidate
+                    current, result, residual = new_model, new_result, new_residual
+                    history.append((worst, new_surface))
+                    break
+            scale *= 0.5
+        else:
+            break
+    return current, result, history
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model")
@@ -203,9 +261,11 @@ def main():
     parser.add_argument("--vmic", type=float, default=2)
     parser.add_argument("--absorption-only", action="store_true")
     parser.add_argument("--molecular-cross-section", action="append", default=[])
+    parser.add_argument("--adjust-layers", type=int, default=0)
+    parser.add_argument("--steps", type=int, default=1)
     args = parser.parse_args()
-    if not math.isfinite(args.vmic) or args.vmic < 0:
-        parser.error("Use finite nonnegative microturbulence")
+    if not math.isfinite(args.vmic) or args.vmic < 0 or args.adjust_layers < 0 or args.steps < 1:
+        parser.error("Use nonnegative microturbulence and layer count, and at least one step")
     try:
         model = read_document(args.model)
         reference = read_wavelengths(args.wavelengths)
@@ -214,24 +274,33 @@ def main():
         with Path(args.composition).open(encoding="utf-8") as stream:
             composition = json.load(stream)
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
-        flux, heating, luminosity, shells, iterations, mismatch = evaluate(
-            model, wavelengths, lines, composition, tables,
-            args.core_rays, args.vmic, include_scattering=not args.absorption_only,
-        )
+        initial = model
+        if args.adjust_layers:
+            model, result, history = correct_temperatures(
+                model, wavelengths, lines, composition, args.adjust_layers, args.steps,
+                tables, args.core_rays, args.vmic, include_scattering=not args.absorption_only,
+            )
+            for step, (residual, surface) in enumerate(history):
+                print(f"Step {step}: max outer-shell luminosity residual {residual:.4e}, "
+                      f"surface total-flux error {surface:+.3%}", file=sys.stderr)
+        else:
+            result = evaluate(model, wavelengths, lines, composition, tables,
+                              args.core_rays, args.vmic, include_scattering=not args.absorption_only)
+        flux, heating, luminosity, shells, iterations, mismatch = result
         budget = list(reference_flux_budget(model, flux))
     except (IndexError, OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
-    writer.writerow(("layer", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
+    writer.writerow(("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
                      "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",
                      "shell_to_next_heating_erg_g_s", "shell_to_next_heating_erg_s",
                      "marcs_convective_flux_erg_cm2_s", "total_flux_erg_cm2_s",
                      "target_flux_erg_cm2_s", "relative_total_flux_error"))
-    for i, (row, thermo, f, q, lum, shell, diagnostic) in enumerate(
-        zip(model.structure, model.thermodynamics, flux, heating, luminosity,
+    for i, (old, row, thermo, f, q, lum, shell, diagnostic) in enumerate(
+        zip(initial.structure, model.structure, model.thermodynamics, flux, heating, luminosity,
             [*shells, ("", "")], budget), 1
     ):
-        writer.writerow((i, row[3], thermo[-1], f, q, lum, *shell, *diagnostic))
+        writer.writerow((i, old[3], row[3], thermo[-1], f, q, lum, *shell, *diagnostic))
     print(f"Surface total-flux error: {budget[0][-1]:+.3%}", file=sys.stderr)
     print(f"Maximum scattering iterations per wavelength: {iterations}", file=sys.stderr)
     print(f"Relative mismatch from trapezoidal integration of pointwise heating: {mismatch:+.3e}", file=sys.stderr)
