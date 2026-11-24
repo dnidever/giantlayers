@@ -2,11 +2,13 @@
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import sys
 
+from hminus import K_B
 from lte_chemistry import Thermochemistry
+from lte_opacity import composition
 from marcs_writer import read_document
 
 G = 6.67430e-8
@@ -18,6 +20,7 @@ class HydrostaticProfile:
     pressure: tuple
     radius: tuple
     density: tuple
+    electron_density: tuple
     iterations: int
     pressure_residual: float
     radius_residual: float
@@ -59,8 +62,8 @@ def solve(column_mass, temperature, abundances, stellar_mass, gravity, surface_p
     for iteration in range(1, max_iterations + 1):
         local_g = [gm / r**2 for r in radii]
         pressure = integrate(increments(column_mass, local_g), surface_pressure)
-        density = [chemistry.solve(t, p, abundances).mass_density
-                   for t, p in zip(temperature, pressure)]
+        gas = [chemistry.solve(t, p, abundances) for t, p in zip(temperature, pressure)]
+        density = [state.mass_density for state in gas]
         thickness = integrate(increments(column_mass, [1 / rho for rho in density]), 0.0)
         anchor = thickness[reference_index]
         updated_radius = [reference_radius + (anchor - depth) for depth in thickness]
@@ -72,8 +75,9 @@ def solve(column_mass, temperature, abundances, stellar_mass, gravity, surface_p
         pressure_error = max(abs(a-b)/b for a, b in zip(actual, expected))
         radius_error = max(abs(a-b)/reference_radius for a,b in zip(radii, updated_radius))
         if max(pressure_error, radius_error) <= tolerance:
+            electrons = tuple(state.electron_density for state in gas)
             return HydrostaticProfile(tuple(pressure), tuple(updated_radius), tuple(density),
-                                      iteration, pressure_error, radius_error)
+                                      electrons, iteration, pressure_error, radius_error)
         radii = updated_radius
     raise RuntimeError(f"Hydrostatic solution did not converge in {max_iterations} iterations")
 
@@ -95,22 +99,55 @@ def marcs_radial_grid(model):
     return integrate(cells, 0.0), radii
 
 
+def solve_marcs_benchmark(model, chemistry=None, mixture=None):
+    """Reconstruct hydrostatic conditions on the reference radial mass grid."""
+    mass = float(model.header[5].split()[0]) * SOLAR_MASS
+    gravity = float(model.header[3].split()[0])
+    anchor = min(range(len(model.structure)), key=lambda i: abs(model.structure[i][0]))
+    if mass <= 0 or not math.isclose(model.structure[anchor][0], 0.0, abs_tol=1e-8):
+        raise ValueError("Use a spherical MARCS model with a layer at log(tau_Ross) = 0")
+    column_mass, original_radius = marcs_radial_grid(model)
+    chemistry = chemistry or Thermochemistry()
+    abundances = {el: model.abundances[atom["atomic_number"] - 1]
+                  for el, atom in chemistry.atoms.items()}
+    if mixture is not None:
+        abundances = composition(abundances, mixture)
+    solution = solve(column_mass, [row[3] for row in model.structure], abundances,
+                     mass, gravity, model.structure[0][5], anchor, chemistry)
+    return solution, column_mass, original_radius, anchor
+
+
+def reconstruct_for_transfer(model, chemistry=None, mixture=None):
+    """Build a transfer input with a fixed temperature and new hydrostatic structure.
+
+    Rosseland depth labels and the convective fraction are reference data.
+    This in-memory record is intended for transfer, since the chemistry
+    and convection tables in a complete model would also require updating.
+    """
+    solution, mass, _, anchor = solve_marcs_benchmark(model, chemistry, mixture)
+    reference_radius = solution.radius[anchor]
+    header = list(model.header)
+    _, label = header[7].split(maxsplit=1)
+    header[7] = f"{reference_radius:.17e} {label}"
+    structure = tuple(
+        (*row[:2], reference_radius - r, row[3], K_B * row[3] * ne, p, *row[6:])
+        for row, r, ne, p in zip(model.structure, solution.radius, solution.electron_density,
+                                 solution.pressure)
+    )
+    thermo = tuple(
+        (*row[:2], rho, *row[3:6], column)
+        for row, rho, column in zip(model.thermodynamics, solution.density, mass)
+    )
+    return replace(model, header=tuple(header), structure=structure, thermodynamics=thermo), solution
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", help="Spherical MARCS reference .mod or .mod.gz")
     args = parser.parse_args()
     try:
         model = read_document(args.model)
-        mass = float(model.header[5].split()[0]) * SOLAR_MASS
-        gravity = float(model.header[3].split()[0])
-        anchor = min(range(len(model.structure)), key=lambda i: abs(model.structure[i][0]))
-        if mass <= 0 or not math.isclose(model.structure[anchor][0], 0.0, abs_tol=1e-8):
-            raise ValueError("Use a spherical MARCS model with a layer at log(tau_Ross) = 0")
-        column_mass, reference_radius = marcs_radial_grid(model)
-        chemistry = Thermochemistry()
-        abundances = {el: model.abundances[row["atomic_number"]-1] for el, row in chemistry.atoms.items()}
-        result = solve(column_mass, [row[3] for row in model.structure], abundances,
-                       mass, gravity, model.structure[0][5], anchor, chemistry)
+        result, column_mass, reference_radius, _ = solve_marcs_benchmark(model)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)
