@@ -99,8 +99,29 @@ def marcs_radial_grid(model):
     return integrate(cells, 0.0), radii
 
 
-def solve_marcs_benchmark(model, chemistry=None, mixture=None):
-    """Reconstruct hydrostatic conditions on the reference radial mass grid."""
+@dataclass(frozen=True)
+class HydrostaticBoundary:
+    """Inputs held fixed across coupled trials on a radial mass grid."""
+
+    column_mass: tuple
+    stellar_mass: float
+    gravity: float
+    surface_pressure: float
+    anchor: int
+    abundances: dict
+    chemistry: Thermochemistry
+
+    @property
+    def reference_radius(self):
+        return math.sqrt(G * self.stellar_mass / self.gravity)
+
+    def solve(self, temperature):
+        return solve(self.column_mass, temperature, self.abundances, self.stellar_mass,
+                     self.gravity, self.surface_pressure, self.anchor, self.chemistry)
+
+
+def boundary_from_marcs(model, chemistry=None, mixture=None):
+    """Take the benchmark grid and boundary data from the original MARCS record."""
     mass = float(model.header[5].split()[0]) * SOLAR_MASS
     gravity = float(model.header[3].split()[0])
     anchor = min(range(len(model.structure)), key=lambda i: abs(model.structure[i][0]))
@@ -112,19 +133,28 @@ def solve_marcs_benchmark(model, chemistry=None, mixture=None):
                   for el, atom in chemistry.atoms.items()}
     if mixture is not None:
         abundances = composition(abundances, mixture)
-    solution = solve(column_mass, [row[3] for row in model.structure], abundances,
-                     mass, gravity, model.structure[0][5], anchor, chemistry)
-    return solution, column_mass, original_radius, anchor
+    boundary = HydrostaticBoundary(tuple(column_mass), mass, gravity, model.structure[0][5],
+                                   anchor, abundances, chemistry)
+    return boundary, original_radius
 
 
-def reconstruct_for_transfer(model, chemistry=None, mixture=None):
-    """Build a transfer input with a fixed temperature and new hydrostatic structure.
+def solve_marcs_benchmark(model, chemistry=None, mixture=None):
+    """Reconstruct hydrostatic conditions on the reference radial mass grid."""
+    boundary, original_radius = boundary_from_marcs(model, chemistry, mixture)
+    solution = boundary.solve([row[3] for row in model.structure])
+    return solution, boundary.column_mass, original_radius, boundary.anchor
 
-    Rosseland depth labels and the convective fraction are reference data.
-    This in-memory record is intended for transfer, since the chemistry
-    and convection tables in a complete model would also require updating.
+
+def reconstruct_for_transfer(model, chemistry=None, mixture=None, boundary=None):
+    """Build an in-memory transfer profile with recomputed hydrostatic structure.
+
+    For coupled trials, pass the boundary from the original atmosphere to
+    retain the mass grid, surface pressure, and the reference radius.
     """
-    solution, mass, _, anchor = solve_marcs_benchmark(model, chemistry, mixture)
+    if boundary is None:
+        boundary, _ = boundary_from_marcs(model, chemistry, mixture)
+    solution = boundary.solve([row[3] for row in model.structure])
+    mass, anchor = boundary.column_mass, boundary.anchor
     reference_radius = solution.radius[anchor]
     header = list(model.header)
     _, label = header[7].split(maxsplit=1)
