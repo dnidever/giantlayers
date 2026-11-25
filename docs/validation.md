@@ -121,3 +121,13 @@ The TiO example uses the published [ExoMol ToTo files](https://www.exomol.com/da
 ## Temperature smoothness and layer structure
 
 Use `--temperature-smoothness WEIGHT` to add a penalty for short-scale oscillations to a temperature fit. At every interior layer, the solver compares log temperature with a linear interpolation from the neighboring layers in the reference log Rosseland coordinate. It includes these weighted differences in the least-squares objective and in trial-step acceptance. Luminosity convergence is still measured from the unpenalized flux errors. The default weight of zero preserves the original objective. Test sensitivity to the weight and to the layer grid before interpreting a feature in the temperature structure.
+
+## Compare native and MARCS flux samples
+
+The MARCS GS98 archive contains the `.flx.gz` record for the fiducial atmosphere. Pair it with the published `flx_wavelengths.vac.gz` grid. Run GiantLayers on the complete grid with `--output-spectrum native.csv` and then compare broad wavelength integrals:
+
+```sh
+python -m compare_marcs_flux native.csv flx_wavelengths.vac.gz fiducial.flx.gz --sampled
+```
+
+Use repeatable `--band SHORT_NM LONG_NM` arguments for other ranges. The comparison requires an exact match between the native and MARCS wavelength arrays. These broad-band trapezoidal integrals compare statistical samples of flux per wavelength normalized to each model's reference radius. Line strengths and narrow-band integrals require dedicated spectrum synthesis. [MARCS flux format](https://marcs.astro.uu.se/docs.html)

@@ -1,4 +1,4 @@
-"""Compare ODF band-integrated flux with published MARCS flux samples."""
+"""Compare GiantLayers band-integrated flux with published MARCS samples."""
 
 import argparse
 from bisect import bisect_right
@@ -7,6 +7,9 @@ import gzip
 import math
 from pathlib import Path
 import sys
+
+
+DEFAULT_BANDS_NM = ((400, 700), (700, 1000), (1000, 2500), (2500, 5000), (5000, 10000))
 
 
 def read_samples(path):
@@ -42,24 +45,50 @@ def compare(bands, wavelength_angstrom, flux_per_angstrom):
             yield short, long, flux, reference, flux / reference if reference > 0 else ""
 
 
+def sampled_bands(path, wavelengths, bands):
+    """Integrate a native spectrum on exactly the supplied MARCS grid."""
+    opener = gzip.open if Path(path).suffix == ".gz" else open
+    with opener(path, "rt", newline="", encoding="utf-8") as stream:
+        samples = [(float(row["wavelength_vacuum_A"]), float(row["reference_flux_per_A"]))
+                   for row in csv.DictReader(stream)]
+    if [row[0] for row in samples] != wavelengths:
+        raise ValueError("GiantLayers samples must use the complete, ordered MARCS wavelength grid")
+    fluxes = [row[1] for row in samples]
+    requested = [(short, long, 0.0) for short, long in bands]
+    result = [(short, long, integral) for short, long, _, integral, _
+              in compare(requested, wavelengths, fluxes)]
+    if len(result) != len(requested):
+        raise ValueError("All requested bands must lie inside the shared wavelength grid")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("bands", help="Band CSV from odf_transfer.py")
+    parser.add_argument("bands", help="Band CSV, or native wavelength CSV with --sampled")
     parser.add_argument("wavelengths", help="MARCS flx_wavelengths.vac, optionally gzipped")
     parser.add_argument("flux", help="MARCS model .flx, optionally gzipped")
+    parser.add_argument("--sampled", action="store_true",
+                        help="Integrate the native --output-spectrum CSV on the full MARCS grid")
+    parser.add_argument("--band", nargs=2, type=float, action="append", metavar=("SHORT_NM", "LONG_NM"),
+                        help="Band edges for --sampled, repeatable")
     args = parser.parse_args()
     try:
-        with open(args.bands, newline="", encoding="utf-8") as stream:
-            rows = csv.DictReader(stream)
-            bands = [
-                tuple(float(row[key]) for key in (
-                    "wavelength_min_nm", "wavelength_max_nm", "surface_flux_erg_cm2_s"
-                ))
-                for row in rows
-            ]
-        comparison = list(compare(bands, read_samples(args.wavelengths), read_samples(args.flux)))
+        wavelengths = read_samples(args.wavelengths)
+        if args.sampled:
+            bands = sampled_bands(args.bands, wavelengths, args.band or DEFAULT_BANDS_NM)
+        else:
+            if args.band:
+                raise ValueError("--band requires --sampled")
+            with open(args.bands, newline="", encoding="utf-8") as stream:
+                bands = [
+                    tuple(float(row[key]) for key in (
+                        "wavelength_min_nm", "wavelength_max_nm", "surface_flux_erg_cm2_s"
+                    ))
+                    for row in csv.DictReader(stream)
+                ]
+        comparison = list(compare(bands, wavelengths, read_samples(args.flux)))
         if not comparison:
-            raise ValueError("No ODF bands are fully covered by the MARCS wavelength grid")
+            raise ValueError("No bands are fully covered by the MARCS wavelength grid")
     except (OSError, ValueError, KeyError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)

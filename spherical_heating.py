@@ -252,15 +252,18 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     return result
 
 
-def evaluate_band(arguments, collect_surface_mean):
-    means = []
-    callback = (lambda wave, nu, weight, mean: means.append(mean)) if collect_surface_mean else None
-    return evaluate(*arguments, surface_mean_sample=callback), means
+def evaluate_band(arguments, line_scale, collect_surface_mean, collect_surface_flux):
+    means, fluxes = [], []
+    mean_callback = (lambda wave, nu, weight, mean: means.append(mean)) if collect_surface_mean else None
+    flux_callback = (lambda wave, nu, weight, flux: fluxes.append(flux)) if collect_surface_flux else None
+    result = evaluate(*arguments, line_scale=line_scale,
+                      surface_sample=flux_callback, surface_mean_sample=mean_callback)
+    return result, means, fluxes
 
 
 def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmic,
                       chemistry, kernel_path, workers, hydrostatic_force=(), line_scale=1.0,
-                      surface_mean_sample=None):
+                      surface_mean_sample=None, surface_sample=None):
     """Integrate a fixed native atmosphere over overlapping wavelength bands."""
     if len(wavelengths) < 2 or workers < 2:
         raise ValueError("Parallel transfer requires two or more wavelengths and workers")
@@ -270,16 +273,18 @@ def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmi
         futures = [
             executor.submit(evaluate_band,
                             (model, wavelengths[a:b+1], lines, mixture, tables, core_rays, vmic,
-                             True, chemistry, kernel_path, True, hydrostatic_force, None, line_scale),
-                            surface_mean_sample is not None)
+                             True, chemistry, kernel_path, True, hydrostatic_force),
+                            line_scale, surface_mean_sample is not None, surface_sample is not None)
             for a, b in zip(indices, indices[1:])
         ]
-        parts, band_means = zip(*(future.result() for future in futures))
-    if surface_mean_sample is not None:
-        means = [mean for i, band in enumerate(band_means) for mean in (band[1:] if i else band)]
+        parts, band_means, band_fluxes = zip(*(future.result() for future in futures))
+    if surface_sample is not None or surface_mean_sample is not None:
         frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
-        for sample in zip(wavelengths, frequencies, weights, means):
-            surface_mean_sample(*sample)
+        for callback, bands in ((surface_mean_sample, band_means), (surface_sample, band_fluxes)):
+            if callback is not None:
+                values = (value for i, band in enumerate(bands) for value in (band[1:] if i else band))
+                for sample in zip(wavelengths, frequencies, weights, values):
+                    callback(*sample)
     # The shared endpoints carry half-weights for the two neighboring
     # intervals. Their sum yields the original wavelength quadrature.
     flux = [math.fsum(values) for values in zip(*(part[0] for part in parts))]

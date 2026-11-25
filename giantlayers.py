@@ -288,10 +288,11 @@ def main():
 
         def transfer_on_grid(surface_sample=None, line_scale=1.0, grid=None, surface_mean_sample=None):
             grid = wavelengths if grid is None else grid
-            if args.workers > 1 and surface_sample is None:
+            if args.workers > 1:
                 return evaluate_parallel(model, grid, lines, {}, tables, args.core_rays,
                                          args.vmic, boundary.chemistry, args.kernel, args.workers,
-                                         boundary.radiative_acceleration, line_scale, surface_mean_sample)
+                                         boundary.radiative_acceleration, line_scale, surface_mean_sample,
+                                         surface_sample)
             return evaluate(model, grid, lines, {}, tables, args.core_rays,
                             args.vmic, chemistry=boundary.chemistry,
                             kernel_path=args.kernel, native_convection=True,
