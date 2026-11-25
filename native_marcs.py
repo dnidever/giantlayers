@@ -35,10 +35,15 @@ def exterior_column(model, boundary):
     return boundary.surface_pressure*outer_radius**2/(G*boundary.stellar_mass)
 
 
+def rosseland_depth(model, boundary, result):
+    """Integrate native Rosseland extinction inward on the radial mass grid."""
+    rosseland = [row[4] for row in result[7]]
+    return optical_depth(boundary.column_mass, rosseland, exterior_column(model, boundary))
+
+
 def photospheric_anchor(model, boundary, result):
     """Interpolate the radial layer index at Rosseland optical depth one."""
-    rosseland = [row[4] for row in result[7]]
-    depth = optical_depth(boundary.column_mass, rosseland, exterior_column(model, boundary))
+    depth = rosseland_depth(model, boundary, result)
     if not depth[0] < 1 < depth[-1]:
         raise ValueError("The column-mass grid must bracket Rosseland optical depth one")
     hi = bisect_left(depth, 1.0)
@@ -64,10 +69,9 @@ def build_document(model, result, lines, tables, boundary, vmic):
     layers = list(prepare_layers(model, lines, {}, vmic, chemistry))
     k5000 = [sum(next(layer_opacities(layer, wavelength, grids))) for layer in layers]
     convection = result[7]
-    rosseland = [row[4] for row in convection]
     radius = boundary.reference_radius
     exterior = exterior_column(model, boundary)
-    ross = list(map(_log, optical_depth(boundary.column_mass, rosseland, exterior)))
+    ross = list(map(_log, rosseland_depth(model, boundary, result)))
     tau5000 = list(map(_log, optical_depth(boundary.column_mass, k5000, exterior)))
     structure, thermo, partial = [], [], []
     for row, layer, lr, l5, conv, column in zip(

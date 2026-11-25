@@ -17,7 +17,7 @@ from lte_chemistry import Thermochemistry
 from lte_opacity import read_lines
 from marcs_writer import MarcsDocument, write_document
 from molecular_cross_section import MolecularCrossSection
-from native_marcs import build_document, photospheric_anchor
+from native_marcs import build_document, photospheric_anchor, rosseland_depth
 from native_transfer import read_wavelengths
 from spherical_heating import (balance_all_layers, evaluate, evaluate_parallel, report_balance_step,
                                total_flux_budget, write_balance_csv)
@@ -200,6 +200,8 @@ def main():
                         help="Maximum fractional luminosity error for convergence")
     parser.add_argument("--require-flux-convergence", action="store_true",
                         help="Exit with status 2 if the final luminosity error exceeds the tolerance")
+    parser.add_argument("--min-bottom-rosseland-tau", type=float,
+                        help="Exit with status 2 if the computed bottom Rosseland depth is smaller")
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
@@ -220,6 +222,9 @@ def main():
     try:
         if args.workers < 1 or not 0 < args.flux_tolerance < 1:
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
+        minimum_tau = args.min_bottom_rosseland_tau
+        if minimum_tau is not None and (not math.isfinite(minimum_tau) or minimum_tau <= 0):
+            raise ValueError("Minimum bottom Rosseland depth must be positive and finite")
         abundances = json.loads(args.abundances.read_text(encoding="utf-8"))
         seed, boundary = initialize(
             args.teff, args.logg, args.mass, abundances, layers=args.layers,
@@ -342,6 +347,11 @@ def main():
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
               f"(maximum error {maximum:.3%})", file=sys.stderr)
+        bottom_tau = rosseland_depth(model, boundary, result)[-1]
+        print(f"Bottom Rosseland optical depth {bottom_tau:.6g}", file=sys.stderr)
+        shallow = minimum_tau is not None and bottom_tau < minimum_tau
+        if shallow:
+            print(f"Bottom optical depth is below the required minimum {minimum_tau:g}", file=sys.stderr)
         for table in molecular:
             cold, hot, low, high = table.clamped_layers(model.structure)
             if any((cold, hot, low, high)):
@@ -360,7 +370,7 @@ def main():
                       *document.header[1:])
             document = replace(document, header=header)
             write_document(document, args.output_model)
-        return 2 if args.require_flux_convergence and maximum > args.flux_tolerance else 0
+        return 2 if shallow or (args.require_flux_convergence and maximum > args.flux_tolerance) else 0
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
 
