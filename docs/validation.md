@@ -169,3 +169,16 @@ python -m compare_marcs_chemistry reference.mod.gz --min-log-tau -4 --max-log-ta
 ```
 
 The command uses the official element-by-element abundances, temperatures, and gas pressures. It reports the differences in electron, CO, CN, water, and TiO partial pressures before any atmospheric temperature or density fitting.
+
+## Composition benchmarks after the unit correction
+
+The four benchmarks use official spherical MARCS atmospheres at 3,500 K, log g = 1, one solar mass, and 2 km/s microturbulence. The alpha pair shares the MARCS metallicity label −0.50 and uses alpha labels +0.40 and +0.00. The heavy-CN mixture uses the official C-depleted, N-enhanced solar-metallicity record. The solver takes each reference's complete abundance vector and independently reconstructs hydrostatic structure on the same 56-layer GiantLayers mass grid. Its starting temperatures come from the earlier GiantLayers GS98 model. It uses revised atomic lines, extended TiO and CO Doppler tables, and ExoMolOP water and VO. CN participates in the equation of state. The radiative transfer in these trials includes no CN line opacity. [Official MARCS grids](https://marcs.astro.uu.se/data.html)
+
+| Composition | C/O by number | Peak luminosity error | Temperature RMS at log Rosseland depth −2 to +1 |
+| --- | --- | --- | --- |
+| GS98 | 0.490 | 0.867% | 66 K |
+| Heavy CN, after recalibration | 0.224 | 0.943% | 107 K |
+| Alpha-enhanced | 0.214 | 17.685% | 186 K |
+| Alpha-poor | 0.537 | 44.830% | 393 K |
+
+All peak errors come from the final independent evaluation on the 100,724-wavelength MARCS grid. The heavy-CN run initially reached 1.176%. Recalibrating the 631-sample fit at that profile and allowing three more corrections brought it under 1%, with surface heating still 8.41% of local LTE emission. The two main alpha fits had their largest luminosity errors at layer 55. A separate alpha-poor run initialized from the official MARCS temperature profile interpolated in log gas pressure reached 12.030% peak error. Its Rosseland-depth overlap extended only to log depth +0.2. The MARCS Fortran reader accepted all six exported trial files.
