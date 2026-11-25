@@ -26,11 +26,12 @@ from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_f
 
 def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
                column_bottom=700.0, gray_tau_bottom=32.0, vmic=2.0, alpha=1.5,
-               chemistry=None):
+               chemistry=None, deep_layers=None):
     """Build an analytic gray starting profile and independent mass grid.
 
     Mass is in solar masses, pressure and column mass are cgs, and
     abundances are absolute log epsilon values indexed by element.
+    Deep layers are counted below the gray seed's photospheric anchor.
     """
     chemistry = chemistry or Thermochemistry()
     if (layers < 4 or not all(math.isfinite(x) and x > 0 for x in
@@ -56,6 +57,10 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
     bottom = math.log1p(column_bottom/scale)
     photosphere = math.log1p(column_bottom/scale * gray_tau_bottom**-0.25)
     anchor = max(1, min(layers - 2, round((layers - 1)*photosphere/bottom)))
+    if deep_layers is not None:
+        if not isinstance(deep_layers, int) or not 1 <= deep_layers <= layers-2:
+            raise ValueError("Deep layers must leave at least one layer above and below the anchor")
+        anchor = layers-1-deep_layers
     axis = [photosphere*(i/anchor-1) for i in range(anchor)]
     axis.extend((bottom-photosphere)*i/(layers-1-anchor) for i in range(layers-anchor))
     column = tuple(scale*math.expm1(x+photosphere) for x in axis)
@@ -166,6 +171,8 @@ def main():
     parser.add_argument("--cia", action="append", default=[], type=Path,
                         help="HITRAN collision-induced absorption table, repeatable")
     parser.add_argument("--layers", type=int, default=56)
+    parser.add_argument("--deep-layers", type=int,
+                        help="Number of grid points below the gray photospheric anchor")
     parser.add_argument("--surface-pressure", type=float, default=1.0, help="Gas pressure in dyn/cm²")
     parser.add_argument("--column-bottom", type=float, default=700.0, help="Bottom column mass in g/cm²")
     parser.add_argument("--gray-tau-bottom", type=float, default=32.0, help="Seed optical depth at bottom")
@@ -218,6 +225,7 @@ def main():
             args.teff, args.logg, args.mass, abundances, layers=args.layers,
             surface_pressure=args.surface_pressure, column_bottom=args.column_bottom,
             gray_tau_bottom=args.gray_tau_bottom, vmic=args.vmic, alpha=args.alpha,
+            deep_layers=args.deep_layers,
         )
         reference = read_wavelengths(args.wavelengths)
         strides = [args.stride, *args.refine_stride]

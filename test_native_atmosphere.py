@@ -18,6 +18,15 @@ from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_deep_grid_refines_below_same_reference_column(self):
+        _, original = initialize(3500, 1, 1, {"H": 12}, layers=56)
+        _, refined = initialize(3500, 1, 1, {"H": 12}, layers=56, deep_layers=18)
+        self.assertEqual(len(refined.column_mass)-1-refined.anchor, 18)
+        self.assertEqual(refined.column_mass[refined.anchor], original.column_mass[original.anchor])
+        self.assertEqual(refined.column_mass[0], original.column_mass[0])
+        self.assertEqual(refined.column_mass[-1], original.column_mass[-1])
+        self.assertTrue(all(a < b for a, b in zip(refined.column_mass, refined.column_mass[1:])))
+
     def test_parallel_wavelength_bands_preserve_flux_and_rosseland_mean(self):
         seed, boundary = initialize(3500, 1, 1, {"H": 12, "He": 10.93}, layers=7)
         model, _ = reconstruct_for_transfer(seed, boundary=boundary)
