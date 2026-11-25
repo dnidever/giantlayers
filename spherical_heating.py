@@ -546,6 +546,14 @@ def update_columns(columns, step, previous, current):
     return [[x + dx*r for x, r in zip(column, remainder)] for dx, column in zip(step, columns)]
 
 
+def jacobian_prediction_error(columns, step, previous, current):
+    """Relative norm of the error in the accepted residual change."""
+    observed = [b-a for a, b in zip(previous, current)]
+    predicted = [math.fsum(dx*value for dx, value in zip(step, row)) for row in zip(*columns)]
+    scale = max(math.hypot(*observed), math.hypot(*predicted), 1e-15)
+    return math.hypot(*(a-b for a, b in zip(observed, predicted))) / scale
+
+
 @dataclass(frozen=True)
 class TrialTransfer:
     boundary: object
@@ -639,7 +647,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
                        jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=(),
-                       temperature_smoothness=0.0, bracket_bottom_flux=False, bracket_deep_layers=1):
+                       temperature_smoothness=0.0, bracket_bottom_flux=False, bracket_deep_layers=1,
+                       adaptive_jacobian=False, jacobian_progress=None):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -730,6 +739,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         return replace(model, structure=structure)
 
     def finite_difference():
+        if jacobian_progress is not None:
+            jacobian_progress(len(knots))
         profiles, deltas = [], []
         for i in range(len(knots)):
             perturb = parameters.copy()
@@ -795,24 +806,33 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         return None
 
     columns = None
+    steps_since_refresh = 0
     for step in range(steps):
         if max(map(abs, residual)) <= flux_tolerance:
             break
-        fresh = columns is None or step % jacobian_interval == 0
+        refresh_due = (steps_since_refresh >= 2*jacobian_interval if adaptive_jacobian
+                       else step % jacobian_interval == 0)
+        fresh = columns is None or refresh_due
         if fresh:
             columns = finite_difference()
+            steps_since_refresh = 0
         accepted = line_search(temperature_direction(columns, residual))
         if accepted is None and not fresh:
             columns = finite_difference()
+            steps_since_refresh = 0
             accepted = line_search(temperature_direction(columns, residual))
         if accepted is None:
             accepted = line_search(merit_descent(columns, residual, len(baseline), peak_weight))
         if accepted is None:
             break
         candidate, (current, result, flux_residual, _), next_residual = accepted
-        if jacobian_interval > 1:
+        if adaptive_jacobian or jacobian_interval > 1:
             delta = [b-a for a, b in zip(parameters, candidate)]
-            columns = update_columns(columns, delta, residual, next_residual)
+            if adaptive_jacobian and jacobian_prediction_error(columns, delta, residual, next_residual) > 0.5:
+                columns = None
+            else:
+                columns = update_columns(columns, delta, residual, next_residual)
+        steps_since_refresh += 1
         parameters, residual = candidate, next_residual
         history.append(metrics(flux_residual))
         if progress is not None:

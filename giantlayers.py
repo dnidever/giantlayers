@@ -24,6 +24,8 @@ from spherical_heating import (balance_all_layers, calibrate_heating, evaluate, 
                                write_balance_csv)
 from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_for_transfer
 
+from transfer_cache import input_fingerprint, read_residuals, transfer_key, write_residuals
+
 
 def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
                column_bottom=700.0, gray_tau_bottom=32.0, vmic=2.0, alpha=1.5,
@@ -219,6 +221,10 @@ def main():
     parser.add_argument("--interpolate-restart", action="store_true",
                         help="Interpolate the restart temperatures onto a new mass grid")
     parser.add_argument("--checkpoint-csv", type=Path, help="Save a restart CSV after each accepted correction")
+    parser.add_argument("--transfer-cache", type=Path,
+                        help="Reuse a matching full-grid calibration from a verified restart")
+    parser.add_argument("--adaptive-jacobian", action="store_true",
+                        help="Refresh the Jacobian based on measured linearization error")
     parser.add_argument("--verify-full", action="store_true",
                         help="Check the final profile at all input wavelengths")
     parser.add_argument("--full-grid-correction", action="store_true",
@@ -265,6 +271,26 @@ def main():
             raise ValueError("Use strictly increasing opacity ramp fractions from zero up to one")
         stages = [(args.stride, scale) for scale in args.opacity_ramp]
         stages.extend((stride, 1.0) for stride in strides)
+        fingerprint = None
+        if args.transfer_cache:
+            opacity_paths = [args.lines, args.kernel, *args.molecular_cross_section, None, *args.cia]
+            reserved = [args.wavelengths, args.abundances, args.restart_csv,
+                        args.checkpoint_csv, args.output_model, args.output_spectrum, *opacity_paths]
+            if args.transfer_cache.resolve() in {path.resolve() for path in reserved if path is not None}:
+                raise ValueError("The transfer cache must be separate from input and output files")
+            try:
+                with args.transfer_cache.open("rb") as stream:
+                    recognized = stream.read(19).startswith(b'{"payload":{"key":')
+            except FileNotFoundError:
+                recognized = True
+            except OSError:
+                recognized = False
+            if recognized:
+                fingerprint = input_fingerprint(opacity_paths)
+            else:
+                print("Ignoring transfer cache path without a recognized cache file", file=sys.stderr)
+                args.transfer_cache = None
+
         lines = read_lines(args.lines) if args.lines else ()
         molecular = [
             MolecularCrossSection(path, omit_hot=path.resolve() in omitted)
@@ -286,23 +312,34 @@ def main():
         if args.restart_csv:
             seed = restart_temperatures(seed, args.restart_csv, args.interpolate_restart)
         model = seed
+        def cache_key():
+            return transfer_key(fingerprint, model, reference, args.core_rays, args.vmic,
+                                args.workers, boundary.radiative_acceleration)
 
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
 
+        last_full_transfer = None
+
         def transfer_on_grid(surface_sample=None, line_scale=1.0, grid=None, surface_mean_sample=None):
+            nonlocal last_full_transfer
             grid = wavelengths if grid is None else grid
             if args.workers > 1:
-                return evaluate_parallel(model, grid, lines, {}, tables, args.core_rays,
-                                         args.vmic, boundary.chemistry, args.kernel, args.workers,
-                                         boundary.radiative_acceleration, line_scale, surface_mean_sample,
-                                         surface_sample)
-            return evaluate(model, grid, lines, {}, tables, args.core_rays,
-                            args.vmic, chemistry=boundary.chemistry,
-                            kernel_path=args.kernel, native_convection=True,
-                            hydrostatic_force=boundary.radiative_acceleration,
-                            surface_sample=surface_sample, line_scale=line_scale,
-                            surface_mean_sample=surface_mean_sample)
+                transfer = evaluate_parallel(
+                    model, grid, lines, {}, tables, args.core_rays, args.vmic, boundary.chemistry,
+                    args.kernel, args.workers, boundary.radiative_acceleration, line_scale,
+                    surface_mean_sample, surface_sample,
+                )
+            else:
+                transfer = evaluate(
+                    model, grid, lines, {}, tables, args.core_rays, args.vmic,
+                    chemistry=boundary.chemistry, kernel_path=args.kernel, native_convection=True,
+                    hydrostatic_force=boundary.radiative_acceleration, surface_sample=surface_sample,
+                    line_scale=line_scale, surface_mean_sample=surface_mean_sample,
+                )
+            if args.transfer_cache and grid == reference and line_scale == 1.0:
+                last_full_transfer = transfer
+            return transfer
 
         update_structure = args.photospheric_anchor or args.radiative_force
         for index, (stride, line_scale) in enumerate(stages, 1):
@@ -319,14 +356,21 @@ def main():
                       file=sys.stderr, flush=True)
                 model, _ = reconstruct_for_transfer(model, boundary=boundary)
                 sampled_transfer = transfer_on_grid()
-                exact_transfer = transfer_on_grid(grid=reference)
+                cached = (read_residuals(args.transfer_cache, cache_key(), len(model.structure))
+                          if args.transfer_cache else None)
+                if cached is None:
+                    exact_transfer = transfer_on_grid(grid=reference)
+                    exact_flux = tuple(row[-1] for row in total_flux_budget(model, exact_transfer, True))
+                    exact_heating = exact_transfer[8]
+                else:
+                    exact_flux, exact_heating = cached
+                    print("Reused verified full-grid calibration", file=sys.stderr, flush=True)
                 sampled = total_flux_budget(model, sampled_transfer, True)
-                exact = total_flux_budget(model, exact_transfer, True)
-                flux_offset = tuple(b[-1]-a[-1] for a, b in zip(sampled, exact))
+                flux_offset = tuple(exact-row[-1] for row, exact in zip(sampled, exact_flux))
                 if args.outer_heating_weight:
-                    heating_scale, heating_offset = calibrate_heating(sampled_transfer[8], exact_transfer[8])
+                    heating_scale, heating_offset = calibrate_heating(sampled_transfer[8], exact_heating)
                     print(f"Full-grid starting surface net heating / LTE emission "
-                          f"{exact_transfer[8][0]:+.3%}", file=sys.stderr, flush=True)
+                          f"{exact_heating[0]:+.3%}", file=sys.stderr, flush=True)
                 print("Iteration errors use the calibrated full-grid residuals",
                       file=sys.stderr, flush=True)
             if args.steps == 0 and args.workers > 1:
@@ -349,6 +393,10 @@ def main():
                     temperature_smoothness=args.temperature_smoothness,
                     bracket_bottom_flux=args.bracket_bottom_flux,
                     bracket_deep_layers=args.bracket_deep_layers,
+                    adaptive_jacobian=args.adaptive_jacobian,
+                    jacobian_progress=lambda count: print(
+                        f"Refreshing Jacobian ({count} atmosphere perturbations)", file=sys.stderr, flush=True
+                    ),
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
@@ -420,6 +468,13 @@ def main():
 
                 result = transfer_on_grid(sample)
         budget = write_balance_csv(sys.stdout, seed, model, result, native_convection=True)
+        if (args.transfer_cache and wavelengths == reference and not args.test_omit_hot_opacity
+                and (args.workers == 1 or result is last_full_transfer)):
+            try:
+                if fingerprint == input_fingerprint(opacity_paths):
+                    write_residuals(args.transfer_cache, cache_key(), tuple(row[-1] for row in budget), result[8])
+            except (OSError, ValueError) as exc:
+                print(f"Could not save full-grid calibration: {exc}", file=sys.stderr)
         maximum = max(abs(row[-1]) for row in budget)
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
