@@ -182,7 +182,7 @@ def shell_energy_budget(radii, density, flux, pointwise_heating):
 
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
              include_scattering=True, chemistry=None, kernel_path=None, native_convection=False,
-             hydrostatic_force=()):
+             hydrostatic_force=(), surface_sample=None):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
@@ -207,7 +207,8 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
         sample = wavelengths[start:end]
         grids = [(table, table.on_grid(sample)) for table in tables]
         opacities = [list(layer_opacities(layer, sample, grids)) for layer in layers]
-        for columns, nu, weight in zip(zip(*opacities), frequencies[start:end], weights[start:end]):
+        for wavelength, columns, nu, weight in zip(sample, zip(*opacities),
+                                                    frequencies[start:end], weights[start:end]):
             absorption = [line + continuum for line, continuum, _ in columns]
             scattering = [scatter if include_scattering else 0.0 for _, _, scatter in columns]
             thermal = [planck_nu(nu, t) for t in temperatures]
@@ -228,6 +229,8 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
                 iterations = 200
             except RuntimeError as exc:
                 raise RuntimeError(f"At {nu:.8g} Hz, {exc}") from exc
+            if surface_sample is not None:
+                surface_sample(wavelength, nu, weight, f[0]*(radii[0]/reference_radius)**2)
             max_iterations = max(max_iterations, iterations)
             for i, (local_flux, local_heating) in enumerate(zip(f, q)):
                 flux[i] += weight * local_flux
@@ -409,7 +412,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
-                       on_accept=None):
+                       on_accept=None, adaptive_knots=0, peak_weight=0.25):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -419,6 +422,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         raise ValueError("Jacobian interval must be at least one")
     if not math.isfinite(outer_heating_weight) or outer_heating_weight < 0:
         raise ValueError("Outer heating weight must be finite and nonnegative")
+    if adaptive_knots < 0 or not math.isfinite(peak_weight) or peak_weight < 0:
+        raise ValueError("Adaptive temperature controls and peak error weight must be nonnegative")
     if boundary is None:
         chemistry = Thermochemistry()
         boundary, _ = boundary_from_marcs(model, chemistry, composition)
@@ -458,7 +463,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         return [*errors, *(w*q for w, q in zip(heating_weights, evaluation[8]))] if heating_weights else errors
 
     def merit(errors):
-        return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + 0.25*max(map(abs, errors))
+        return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + peak_weight*max(map(abs, errors))
 
     residual = objective(result, flux_residual)
     knots, convective_start = global_temperature_knots(convection, upper_knots)
@@ -532,6 +537,15 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             progress(len(history)-1, history[-1])
         if on_accept is not None:
             on_accept(current, result)
+        if adaptive_knots and step + 1 < steps:
+            worst = max((i for i in range(len(axis)) if i not in knots),
+                        key=lambda i: abs(flux_residual[i]), default=None)
+            if worst is not None and abs(flux_residual[worst]) > max(flux_tolerance, 0.7*history[-1][1]):
+                correction = interpolate_corrections(axis, knots, parameters)
+                knots = tuple(sorted((*knots, worst)))
+                parameters = [correction[i] for i in knots]
+                columns = None
+                adaptive_knots -= 1
     return current, result, history, knots, convective_start
 
 

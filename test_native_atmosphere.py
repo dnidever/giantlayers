@@ -14,6 +14,18 @@ from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_polyatomic_carbon_species_follow_mass_action(self):
+        chemistry = Thermochemistry()
+        values = {"H": 12, "C": 9.0, "O": 8.83, "N": 7.92}
+        t = 3000
+        gas = chemistry.solve(t, 1000, values)
+        from hminus import K_B
+        pressure = {name: n*K_B*t for name, n in gas.number_densities.items()}
+        for species in ("HCN", "C2H2"):
+            data = chemistry.molecules[species]
+            ratio = math.prod(pressure[a] for a in data["atoms"])/pressure[species]
+            self.assertAlmostEqual(math.log10(ratio), data["log10_kp_cgs"][3])
+
     def test_restart_depth_refinement_preserves_endpoints(self):
         seed, boundary = initialize(3500, 1, 1, {"H": 12}, layers=7)
         with TemporaryDirectory() as directory:

@@ -174,6 +174,10 @@ def main():
     parser.add_argument("--steps", type=int, default=1,
                         help="Temperature corrections per stage (0 to evaluate the initial profile)")
     parser.add_argument("--upper-knots", type=int, default=12)
+    parser.add_argument("--adaptive-knots", type=int, default=0,
+                        help="Add up to this many temperature controls at large residuals per stage")
+    parser.add_argument("--peak-error-weight", type=float, default=0.25,
+                        help="Weight of the maximum error in the temperature step acceptance criterion")
     parser.add_argument("--jacobian-interval", type=int, default=3,
                         help="Steps between finite-difference Jacobian refreshes")
     parser.add_argument("--kernel", type=Path, help="Optional compiled spherical transfer library")
@@ -182,6 +186,7 @@ def main():
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
+    parser.add_argument("--output-spectrum", type=Path, help="Write the emergent spectrum on the final grid")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
     parser.add_argument("--interpolate-restart", action="store_true",
                         help="Interpolate the restart temperatures onto a new mass grid")
@@ -215,11 +220,12 @@ def main():
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
 
-        def transfer_on_grid():
+        def transfer_on_grid(surface_sample=None):
             return evaluate(model, wavelengths, lines, {}, tables, args.core_rays,
                             args.vmic, chemistry=boundary.chemistry,
                             kernel_path=args.kernel, native_convection=True,
-                            hydrostatic_force=boundary.radiative_acceleration)
+                            hydrostatic_force=boundary.radiative_acceleration,
+                            surface_sample=surface_sample)
 
         update_structure = args.photospheric_anchor or args.radiative_force
         for stride in strides:
@@ -233,6 +239,7 @@ def main():
                 flux_tolerance=args.flux_tolerance, jacobian_interval=args.jacobian_interval,
                 outer_heating_weight=args.outer_heating_weight,
                 on_accept=checkpoint if args.checkpoint_csv else None,
+                adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
             )
             if update_structure and stride != strides[-1]:
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
@@ -262,6 +269,16 @@ def main():
         if args.radiative_force:
             print(f"Peak radiative acceleration / reference gravity {max(result[9])/boundary.gravity:.3%}",
                   file=sys.stderr)
+        if args.output_spectrum:
+            with args.output_spectrum.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(("wavelength_vacuum_A", "frequency_Hz", "frequency_weight_Hz",
+                                 "reference_flux_per_Hz", "reference_flux_per_A"))
+
+                def sample(wavelength, frequency, weight, flux):
+                    writer.writerow((wavelength, frequency, weight, flux, flux*frequency/wavelength))
+
+                result = transfer_on_grid(sample)
         budget = write_balance_csv(sys.stdout, seed, model, result, native_convection=True)
         maximum = max(abs(row[-1]) for row in budget)
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"

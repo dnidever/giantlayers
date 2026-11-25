@@ -324,3 +324,15 @@ Compare the exported model with a published model at the same stellar parameters
 ```sh
 python3 -m compare_atmospheres published.mod.gz trial.mod.gz > structure-comparison.csv
 ```
+
+### Carbon-rich mixtures
+
+Change the carbon abundance in the input JSON to set C/O. The native LTE equation of state includes CO, CN, C₂, HCN, and acetylene. HCN and acetylene use NASA Glenn Gibbs energies for the dissociation equilibrium and ExoMol partition functions for explicit line strengths. The tabulated dissociation constants cover 1,000–6,000 K. Above the available partition-function temperatures (4,000 K for HCN and 5,000 K for acetylene), the line-strength partition function uses the closest tabulated value. [NASA Glenn thermochemistry](https://ntrs.nasa.gov/citations/20020085330) · [HCN partition function](https://exomol.com/data/data-types/opacity/HCN/1H-12C-14N/Harris/) · [Acetylene line list](https://academic.oup.com/mnras/article/493/2/1531/5716685)
+
+To include carbon-bearing molecular absorption, convert the published CN and C₂ cross sections and add them with `--molecular-cross-section`. The abundance inputs independently set the molecular number densities used to convert the cross sections to mass opacity. [CN MoLLIST](https://www.exomol.com/data/data-types/linelist/CN/12C-14N/MoLLIST-CN/) · [C₂ 8states](https://exomol.com/data/data-types/opacity/C2/12C2/8states/)
+
+Use `--adaptive-knots 4` to allow up to four additional temperature controls at layers with large luminosity residuals during each stage. `--peak-error-weight` changes the weight assigned to the maximum residual in the acceptance criterion. The final CSV records the luminosity error of every layer.
+
+### Export the emergent spectrum
+
+Pass `--output-spectrum spectrum.csv` to evaluate the final atmosphere and write the outgoing surface flux on the final wavelength grid. The spectrum reports flux per Hz and per Å at the model's reference radius, plus the integration weight of each sample. Summing flux per Hz times its weight recovers the integrated radiative surface flux at the reference radius.
