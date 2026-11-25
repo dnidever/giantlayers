@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
 from marcs_writer import MarcsDocument
-from spherical_heating import (FormalTransfer, angular_geometry, correct_temperatures,
+from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, correct_temperatures,
                                shell_energy_budget, solve_wavelength)
 from spherical_transfer import disk_rays, surface_fluxes
 
@@ -142,6 +142,34 @@ class TransferChecks(unittest.TestCase):
         self.assertLess(max(map(abs, history[-1])), 1e-12)
         for row, expected in zip(corrected.structure, (3040, 3450, 4300, 4600)):
             self.assertAlmostEqual(row[3], expected)
+
+    def test_global_balance_updates_radiative_and_convective_layers(self):
+        header = ("", "3500", "1", "", "", "", "", "1")
+        rows = tuple((i, 0, 0, 3000 + 100*i) for i in range(8))
+        model = MarcsDocument(header, (), rows, ((0,) * 7,) * 8, ())
+        convection = (0.0, 0.0, 0.001, 0.0, 0.0, 0.01, 0.1, 0.4)
+
+        def transfer(trial, *args):
+            radiative = [
+                4*math.pi*(1 - conv + 1e-4*(row[3] - 1.01*initial[3]))
+                for row, initial, conv in zip(trial.structure, rows, convection)
+            ]
+            return None, None, radiative, None, None, None, convection
+
+        boundary = SimpleNamespace(reference_radius=1)
+        with (
+            patch("spherical_heating.boundary_from_marcs", return_value=(boundary, None)),
+            patch("spherical_heating.reconstruct_for_transfer", side_effect=lambda profile, **_: (profile, None)),
+            patch("spherical_heating.evaluate", side_effect=transfer),
+        ):
+            corrected, _, history, knots, start = balance_all_layers(model, (), (), {}, upper_knots=2)
+
+        self.assertEqual(start, 5)
+        self.assertEqual(knots, (0, 4, 5, 6, 7))
+        self.assertEqual(len(history), 2)
+        self.assertLess(history[-1][1], 1e-8)
+        for row, initial in zip(corrected.structure, rows):
+            self.assertAlmostEqual(row[3], 1.01*initial[3], places=5)
 
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
