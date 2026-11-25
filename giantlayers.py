@@ -11,6 +11,7 @@ import sys
 from tempfile import NamedTemporaryFile
 
 from benchmark_sampling import nested_wavelengths
+from collision_induced import HitranCIA
 from gray_atmosphere import SIGMA
 from lte_chemistry import Thermochemistry
 from lte_opacity import read_lines
@@ -161,6 +162,8 @@ def main():
     parser.add_argument("--mass", type=float, required=True, help="Mass in solar masses")
     parser.add_argument("--lines", type=Path, help="Atomic line-list CSV")
     parser.add_argument("--molecular-cross-section", action="append", default=[], type=Path)
+    parser.add_argument("--cia", action="append", default=[], type=Path,
+                        help="HITRAN collision-induced absorption table, repeatable")
     parser.add_argument("--layers", type=int, default=56)
     parser.add_argument("--surface-pressure", type=float, default=1.0, help="Gas pressure in dyn/cm²")
     parser.add_argument("--column-bottom", type=float, default=700.0, help="Bottom column mass in g/cm²")
@@ -170,6 +173,8 @@ def main():
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--refine-stride", type=int, action="append", default=[],
                         help="Continue on a finer wavelength stride after the initial stage")
+    parser.add_argument("--opacity-ramp", type=float, nargs="+", default=[],
+                        help="Start with increasing fractions of line opacity before switching to full opacity")
     parser.add_argument("--core-rays", type=int, default=24)
     parser.add_argument("--steps", type=int, default=1,
                         help="Temperature corrections per stage (0 to evaluate the initial profile)")
@@ -209,8 +214,20 @@ def main():
         strides = [args.stride, *args.refine_stride]
         if any(a <= b for a, b in zip(strides, strides[1:])):
             raise ValueError("Refinement strides must decrease at each stage")
+        opacity_scales = [*args.opacity_ramp, 1.0]
+        if any(not 0 <= a < b for a, b in zip(opacity_scales, opacity_scales[1:])):
+            raise ValueError("Use strictly increasing opacity ramp fractions from zero up to one")
+        stages = [(args.stride, scale) for scale in args.opacity_ramp]
+        stages.extend((stride, 1.0) for stride in strides)
         lines = read_lines(args.lines) if args.lines else ()
-        tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
+        molecular = [MolecularCrossSection(path) for path in args.molecular_cross_section]
+        cia = [HitranCIA(path) for path in args.cia]
+        known_cia = boundary.chemistry.atoms.keys() | boundary.chemistry.molecules.keys()
+        if any(not set(table.species) <= known_cia for table in cia):
+            raise ValueError("CIA partners must be neutral atoms or molecules in the LTE chemistry table")
+        if len({tuple(sorted(table.species)) for table in cia}) != len(cia):
+            raise ValueError("Provide one CIA table per collision pair")
+        tables = [*molecular, *cia]
         if args.interpolate_restart and not args.restart_csv:
             raise ValueError("--interpolate-restart requires --restart-csv")
         if args.restart_csv:
@@ -228,9 +245,10 @@ def main():
                             surface_sample=surface_sample)
 
         update_structure = args.photospheric_anchor or args.radiative_force
-        for stride in strides:
+        for index, (stride, line_scale) in enumerate(stages, 1):
             wavelengths = nested_wavelengths(reference, stride)
-            print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride})",
+            print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride}, "
+                  f"line opacity {line_scale:.0%})",
                   file=sys.stderr, flush=True)
             model, result, _, _, _ = balance_all_layers(
                 model, wavelengths, lines, {}, steps=args.steps, tables=tables,
@@ -240,8 +258,9 @@ def main():
                 outer_heating_weight=args.outer_heating_weight,
                 on_accept=checkpoint if args.checkpoint_csv else None,
                 adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
+                line_scale=line_scale,
             )
-            if update_structure and stride != strides[-1]:
+            if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
                                               args.radiative_force)
         if args.verify_full and wavelengths != reference:
@@ -284,11 +303,17 @@ def main():
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
               f"(maximum error {maximum:.3%})", file=sys.stderr)
-        for table in tables:
+        for table in molecular:
             cold, hot, low, high = table.clamped_layers(model.structure)
             if any((cold, hot, low, high)):
                 print(f"{table.isotopologue} boundary opacity used in layers outside tabulated "
                       f"T (cold {cold}, hot {hot}) or P (low {low}, high {high})",
+                      file=sys.stderr)
+        for table in cia:
+            outside = sum(not table.temperatures[0] <= row[3] <= table.temperatures[-1]
+                          for row in model.structure)
+            if outside:
+                print(f"{'-'.join(table.species)} CIA temperature clamped in {outside} layers",
                       file=sys.stderr)
         if args.output_model:
             document = build_document(model, result, lines, tables, boundary, args.vmic)

@@ -182,7 +182,7 @@ def shell_energy_budget(radii, density, flux, pointwise_heating):
 
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
              include_scattering=True, chemistry=None, kernel_path=None, native_convection=False,
-             hydrostatic_force=(), surface_sample=None):
+             hydrostatic_force=(), surface_sample=None, line_scale=1.0):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
@@ -209,7 +209,7 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
         opacities = [list(layer_opacities(layer, sample, grids)) for layer in layers]
         for wavelength, columns, nu, weight in zip(sample, zip(*opacities),
                                                     frequencies[start:end], weights[start:end]):
-            absorption = [line + continuum for line, continuum, _ in columns]
+            absorption = [line_scale*line + continuum for line, continuum, _ in columns]
             scattering = [scatter if include_scattering else 0.0 for _, _, scatter in columns]
             thermal = [planck_nu(nu, t) for t in temperatures]
             if native_convection:
@@ -412,7 +412,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
-                       on_accept=None, adaptive_knots=0, peak_weight=0.25):
+                       on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -424,6 +424,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         raise ValueError("Outer heating weight must be finite and nonnegative")
     if adaptive_knots < 0 or not math.isfinite(peak_weight) or peak_weight < 0:
         raise ValueError("Adaptive temperature controls and peak error weight must be nonnegative")
+    if not math.isfinite(line_scale) or not 0 <= line_scale <= 1:
+        raise ValueError("Line opacity scale must be in [0, 1]")
     if boundary is None:
         chemistry = Thermochemistry()
         boundary, _ = boundary_from_marcs(model, chemistry, composition)
@@ -440,7 +442,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         current, _ = reconstruct_for_transfer(profile, boundary=boundary)
         force = getattr(boundary, "radiative_acceleration", ())
         result = evaluate(current, wavelengths, lines, composition, tables, core_rays,
-                          vmic, include_scattering, chemistry, kernel_path, True, force)
+                          vmic, include_scattering, chemistry, kernel_path, True, force, None, line_scale)
         convection = [
             4 * math.pi * (radius-row[2])**2 * flux / luminosity_target
             for row, flux in zip(current.structure, result[6])

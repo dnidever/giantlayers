@@ -3,9 +3,12 @@
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
+from collision_induced import HitranCIA
 from giantlayers import initialize, restart_temperatures
+from hminus import K_B
 from lte_chemistry import Thermochemistry
 from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
@@ -14,12 +17,35 @@ from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_cold_dense_chemistry_preserves_pressure_and_charge(self):
+        chemistry = Thermochemistry()
+        abundances = {"H": 12, "He": 10.93, "C": 9.0, "N": 7.92, "O": 8.83,
+                      "Fe": 7.50, "Ar": 6.40}
+        gas = chemistry.solve(1000, 1e5, abundances)
+        particles = math.fsum(gas.number_densities.values())
+        positive = math.fsum(n for name, n in gas.number_densities.items() if name.endswith("+"))
+        negative = gas.electron_density + gas.number_densities["H-"]
+        self.assertAlmostEqual(particles*K_B*1000/1e5, 1.0, places=9)
+        self.assertAlmostEqual(positive/negative, 1.0, places=9)
+
+    def test_cia_interpolates_wavenumber_temperature_and_density(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory)/"pair.cia"
+            records = []
+            for t, a, b in ((2000, 1, 3), (3000, 2, 6)):
+                records.extend((f"{'H2-H2':>20}{100:10.3f}{200:10.3f}{2:7d}{t:7.1f}",
+                                f"100 {a:e}", f"200 {b:e}"))
+            path.write_text("\n".join(records))
+            table = HitranCIA(path)
+        gas = SimpleNamespace(number_densities={"H2": 10.0}, mass_density=2.0, temperature=2500.0)
+        opacity = table.mass_opacity(gas, 1e3, table.on_grid((1e8/150, 1e8/250)))
+        self.assertEqual(opacity, [150.0, 0.0])
+
     def test_polyatomic_carbon_species_follow_mass_action(self):
         chemistry = Thermochemistry()
         values = {"H": 12, "C": 9.0, "O": 8.83, "N": 7.92}
         t = 3000
         gas = chemistry.solve(t, 1000, values)
-        from hminus import K_B
         pressure = {name: n*K_B*t for name, n in gas.number_densities.items()}
         for species in ("HCN", "C2H2"):
             data = chemistry.molecules[species]

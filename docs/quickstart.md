@@ -333,6 +333,12 @@ To include carbon-bearing molecular absorption, convert the published CN and C�
 
 Use `--adaptive-knots 4` to allow up to four additional temperature controls at layers with large luminosity residuals during each stage. `--peak-error-weight` changes the weight assigned to the maximum residual in the acceptance criterion. The final CSV records the luminosity error of every layer.
 
+For mixtures that strongly change the line blanketing, start with reduced line opacity using `--opacity-ramp 0.1 0.5`. GiantLayers solves on the startup wavelength grid at each supplied fraction, then at full line opacity. The continuum and LTE chemistry are evaluated throughout. The optional finer wavelength stages use full opacity.
+
 ### Export the emergent spectrum
 
 Pass `--output-spectrum spectrum.csv` to evaluate the final atmosphere and write the outgoing surface flux on the final wavelength grid. The spectrum reports flux per Hz and per Å at the model's reference radius, plus the integration weight of each sample. Summing flux per Hz times its weight recovers the integrated radiative surface flux at the reference radius.
+
+### Add hydrogen and helium collision-induced absorption
+
+Download the rectangular H₂–H₂, H₂–He, H₂–H, and He–H files from HITRAN and pass each selected pair with `--cia FILE.cia`. The reader also accepts gzip-compressed tables. It interpolates in temperature and wavenumber, then multiplies the coefficient by the two LTE species number densities and divides by mass density. CIA is continuum absorption and retains its full weight during an opacity ramp. Temperature outside a table's axis uses the nearest tabulated value. Wavenumbers outside the tabulated range contribute zero. [HITRAN CIA files](https://hitran.org/cia/) · [Format and reference data](https://hitran.org/data/CIA/CIA_Readme_2024.pdf)

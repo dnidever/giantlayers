@@ -8,4 +8,5 @@ strict: true
 nav:
   - Overview: index.md
   - Quickstart: quickstart.md
+  - Spherical model: spherical.md
   - Gray atmosphere model: model.md

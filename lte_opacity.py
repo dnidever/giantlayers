@@ -182,12 +182,15 @@ def prepare_layers(model, lines, config, vmic=2.0, chemistry=None):
 def layer_opacities(layer, wavelengths, cross_section_grids):
     """Sample line absorption, continuum absorption, and scattering for a layer."""
     gas, pressure, ions, transitions = layer
-    molecular = [table.mass_opacity(gas, pressure, grid) for table, grid in cross_section_grids]
+    molecular, continua = [], []
+    for table, grid in cross_section_grids:
+        target = continua if getattr(table, "is_continuum", False) else molecular
+        target.append(table.mass_opacity(gas, pressure, grid))
     atomic_and_molecular_lines = sample_line_opacity(wavelengths, transitions)
     for j, wavelength in enumerate(wavelengths):
         absorption, scattering = continuum_opacity(wavelength, gas, ions)
         line = atomic_and_molecular_lines[j] + sum(row[j] for row in molecular)
-        yield line, absorption, scattering
+        yield line, absorption + sum(row[j] for row in continua), scattering
 
 
 def opacities(model, wavelengths, lines, config, vmic=2.0, chemistry=None,

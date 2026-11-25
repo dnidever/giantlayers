@@ -45,6 +45,24 @@ class Thermochemistry:
         Abundances are log epsilon values keyed by element symbol, with H=12.
         Number densities are in cm⁻³, and gas pressure is in dyn/cm².
         """
+        try:
+            return self._solve_equilibrium(temperature, gas_pressure, abundances, tolerance, initial)
+        except RuntimeError:
+            if initial is not None:
+                return self.solve(temperature, gas_pressure, abundances, tolerance)
+            start = min(2400.0, self.temperatures[-1])
+            if temperature >= start:
+                raise
+            # A warmer solution supplies a starting point for molecule-rich
+            # states in which an atomic gas is a poor initial approximation.
+            state = self._solve_equilibrium(start, gas_pressure, abundances, tolerance, None)
+            steps = math.ceil((start-temperature)/75.0)
+            for i in range(1, steps+1):
+                t = start + (temperature-start)*(i/steps)
+                state = self._solve_equilibrium(t, gas_pressure, abundances, tolerance, state)
+            return state
+
+    def _solve_equilibrium(self, temperature, gas_pressure, abundances, tolerance, initial):
         if (not math.isfinite(temperature) or not self.temperatures[0] <= temperature <= self.temperatures[-1]
                 or not math.isfinite(gas_pressure) or gas_pressure <= 0):
             raise ValueError("Temperature must lie in the chemistry grid and pressure must be positive")
@@ -52,9 +70,16 @@ class Thermochemistry:
                 or not all(math.isfinite(value) for value in abundances.values())):
             raise ValueError("Supply finite log epsilon abundances for known elements, with H=12")
 
-        elements = tuple(abundances)
+        molecules = {
+            name: data for name, data in self.molecules.items()
+            if all(e in abundances for e in data["atoms"])
+        }
+        coupled = {"H", *(e for data in molecules.values() for e in data["atoms"]
+                          if temperature <= data.get("maximum_formation_temperature", math.inf))}
+        elements = tuple(e for e in abundances if e in coupled)
         indices = {element: i for i, element in enumerate(elements)}
-        ratios = [10 ** (abundances[e] - 12) for e in elements]
+        abundance_ratios = {e: 10 ** (value - 12) for e, value in abundances.items()}
+        ratios = [abundance_ratios[e] for e in elements]
         e_index = len(elements)
         size = e_index + 2
         kt = K_B * temperature
@@ -74,6 +99,7 @@ class Thermochemistry:
         elemental_terms = [[] for _ in elements]
         positive = []
         negative = []
+        atomic_only = []
         q = {}
         masses = {}
 
@@ -87,7 +113,7 @@ class Thermochemistry:
             elif charge < 0:
                 negative.append((k, -charge))
 
-        for element, i in indices.items():
+        for element in abundances:
             atom = self.atoms[element]
             neutral, ion = element, element + "+"
             q[neutral] = partition(atom["neutral_q"])
@@ -95,12 +121,14 @@ class Thermochemistry:
             masses[neutral] = masses[ion] = atom["mass_amu"]
             saha = (math.log(2 * SAHA * temperature**1.5 * q[ion] / q[neutral])
                     - atom["ionization_ev"] / (K_EV * temperature))
-            add(neutral, (element,), ((i, 1),))
-            add(ion, (element,), ((i, 1), (e_index, -1)), saha, charge=1)
+            if element in indices:
+                i = indices[element]
+                add(neutral, (element,), ((i, 1),))
+                add(ion, (element,), ((i, 1), (e_index, -1)), saha, charge=1)
+            else:
+                atomic_only.append((neutral, ion, abundance_ratios[element], saha))
 
-        for name, data in self.molecules.items():
-            if not all(e in indices for e in data["atoms"]):
-                continue
+        for name, data in molecules.items():
             nuclei = data["atoms"]
             q[name] = partition(data["q"])
             masses[name] = sum(masses[e] for e in nuclei)
@@ -123,9 +151,26 @@ class Thermochemistry:
             populations = [math.exp(c + sum(x[i] * p for i, p in powers))
                            for _, powers, c in species]
 
-            def total(terms):
-                amount = 0.0
+            # Atoms outside the molecular network have an analytic Saha
+            # solution at the trial electron and hydrogen nuclei densities.
+            neutral_and_ion = []
+            atomic_number = net_positive = positive_derivative = 0.0
+            nuclei_density = math.exp(x[-1])
+            for _, _, ratio, saha in atomic_only:
+                atom_density = nuclei_density*ratio
+                odds = math.exp(-abs(saha-x[e_index]))
+                minority = odds/(1+odds)
+                majority = 1/(1+odds)
+                neutral, ionized = (minority, majority) if saha > x[e_index] else (majority, minority)
+                neutral_and_ion.append((atom_density*neutral, atom_density*ionized))
+                atomic_number += atom_density
+                net_positive += atom_density*ionized
+                positive_derivative -= atom_density*neutral*ionized
+
+            def total(terms, amount=0.0, electron_derivative=0.0):
                 derivative = [0.0] * size
+                derivative[e_index] = electron_derivative
+                derivative[-1] = amount
                 for j, multiplicity in terms:
                     contribution = multiplicity * populations[j]
                     amount += contribution
@@ -139,39 +184,42 @@ class Thermochemistry:
                 residual.append(amount - math.log(ratio) - x[-1])
                 row[-1] = -1.0
                 jacobian.append(row)
-            pos, dpos = total(positive)
+            pos, dpos = total(positive, net_positive, positive_derivative)
             neg, dneg = total(negative)
             residual.append(pos - neg)
             jacobian.append([a - b for a, b in zip(dpos, dneg)])
-            number, row = total(all_particles)
+            number, row = total(all_particles, atomic_number)
             residual.append(number - math.log(particles))
             jacobian.append(row)
-            return residual, jacobian, populations
+            return residual, jacobian, populations, neutral_and_ion
 
-        nuclei_scale = particles / math.fsum(ratios)
+        nuclei_scale = particles / math.fsum(abundance_ratios.values())
         x = [math.log(r * nuclei_scale) for r in ratios]
         x.extend((math.log(particles * 1e-4), math.log(nuclei_scale)))
-        mass_per_hydrogen = AMU * math.fsum(ratio * masses[e] for ratio, e in zip(ratios, elements))
+        mass_per_hydrogen = AMU * math.fsum(ratio*masses[e] for e, ratio in abundance_ratios.items())
         if initial is not None:
             x = [math.log(initial.number_densities[e]) for e in elements]
             x.extend((math.log(initial.electron_density),
                       math.log(initial.mass_density/mass_per_hydrogen)))
-        residual, jacobian, populations = system(x)
+        residual, jacobian, populations, atomic_populations = system(x)
         for _ in range(60):
             error = max(map(abs, residual))
             if error < tolerance:
                 numbers = dict.fromkeys(q, 0.0)
                 numbers.update((entry[0], n) for entry, n in zip(species, populations))
+                for (neutral, ion, _, _), (n, c) in zip(atomic_only, atomic_populations):
+                    numbers[neutral], numbers[ion] = n, c
                 density = math.exp(x[-1]) * mass_per_hydrogen
                 return GasState(temperature, numbers["e-"], density, numbers, q, masses, error)
             step = _linear_solve(jacobian, [-r for r in residual])
             scale = min(1.0, 4.0 / max(map(abs, step)))
             for _ in range(20):
                 trial = [a + scale * b for a, b in zip(x, step)]
-                next_residual, next_jacobian, next_populations = system(trial)
+                next_residual, next_jacobian, next_populations, next_atomic = system(trial)
                 if max(map(abs, next_residual)) < error:
                     x = trial
                     residual, jacobian, populations = next_residual, next_jacobian, next_populations
+                    atomic_populations = next_atomic
                     break
                 scale *= 0.5
             else:
