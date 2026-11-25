@@ -216,7 +216,9 @@ def main():
                         help="Choose the worst residual in this many deepest layers when bracketing")
     parser.add_argument("--temperature-smoothness", type=float, default=0.0,
                         help="Penalize short-scale log-temperature curvature during the fit")
-    parser.add_argument("--output-atlas", type=Path, help="Write an ATLAS9 DECK6 .dat or .dat.gz record")
+    parser.add_argument("--output-atlas", type=Path, help="Write an ATLAS DECK6 .dat or .dat.gz record")
+    parser.add_argument("--atlas-format", choices=("atlas9", "atlas12"), default="atlas9",
+                        help="Format for --output-atlas (default: atlas9)")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
     parser.add_argument("--output-spectrum", type=Path, help="Write the emergent spectrum on the final grid")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
@@ -245,6 +247,11 @@ def main():
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         if args.equilibrate_surface < 0:
             raise ValueError("Use a nonnegative number of surface correction passes")
+        if args.atlas_format == "atlas12":
+            if not args.output_atlas:
+                raise ValueError("--atlas-format atlas12 requires --output-atlas")
+            if args.layers > 72:
+                raise ValueError("The reference ATLAS12 reader supports at most 72 depth records")
         if args.output_atlas:
             reserved = (args.wavelengths, args.abundances, args.lines, args.kernel, args.restart_csv,
                         args.checkpoint_csv, args.output_model, args.output_spectrum,
@@ -514,7 +521,8 @@ def main():
             document = replace(document, header=header)
             write_document(document, args.output_model)
         if args.output_atlas:
-            write_atlas(model, result, boundary, args.vmic, args.output_atlas, status=status)
+            write_atlas(model, result, boundary, args.vmic, args.output_atlas, status=status,
+                        atlas12=args.atlas_format == "atlas12")
         return 2 if shallow or (args.require_flux_convergence and maximum > args.flux_tolerance) else 0
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))

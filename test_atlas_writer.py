@@ -50,3 +50,35 @@ class AtlasExportChecks(unittest.TestCase):
             self.assertGreater(columns[7], 0)  # Sound speed.
         self.assertEqual(records[header+9][:5], "PRADK")
         self.assertGreater(float(records[header+9][5:]), 0)
+
+    def test_cli_exports_atlas12_punch_layout(self):
+        root = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            composition = path / "abundances.json"
+            composition.write_text('{"H": 12, "He": 11, "C": 8.712, "O": 8.301}')
+            atlas = path / "trial.dat"
+            completed = subprocess.run(
+                [sys.executable, "-m", "giantlayers",
+                 str(root / "examples/continuum-wavelengths.dat"), str(composition),
+                 "--teff", "3500", "--logg", "-.5", "--mass", "1", "--layers", "8",
+                 "--steps", "0", "--atlas-format", "atlas12", "--output-atlas", str(atlas)],
+                cwd=root, capture_output=True, text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            records = atlas.read_text().splitlines()
+
+        self.assertEqual(records[0].split(), ["TEFF", "3500.", "GRAVITY", "-0.50000", "LTE"])
+        table = records.index(" ABUNDANCE TABLE")
+        hydrogen = float(records[table+1][7:17])
+        entries = [row[i:i+20] for row in records[table+2:table+22]
+                   for i in range(0, len(row), 20)]
+        self.assertEqual([int(entry[:5]) for entry in entries], list(range(3, 100)))
+        self.assertEqual(entries[3][5:7], "C ")
+        self.assertAlmostEqual(float(entries[3][7:14])-math.log10(hydrogen)+12, 8.712, delta=0.00051)
+        self.assertTrue(all(float(entry[14:20]) == 0 for entry in entries))
+        deck = table+22
+        self.assertEqual(records[deck], "READ DECK6  8 RHOX,T,P,XNE,ABROSS,ACCRAD,VTURB")
+        self.assertTrue(all(len(row) == 94 for row in records[deck+1:deck+9]))
+        self.assertTrue(records[deck+9].startswith("PRADK"))
+        self.assertEqual(records[deck+10:], ["BEGIN"])

@@ -295,6 +295,8 @@ giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
 
 The ATLAS export includes the input abundance mixture and all native depth points. The title identifies the spherical solution and its luminosity convergence status. The deck stores column mass and omits shell radii. Consumers that require a plane-parallel atmosphere or exactly 72 layers need to account for those assumptions. The `PRADK` field estimates surface radiation pressure from the emergent radiative flux assuming isotropic intensity over the outgoing hemisphere. [Published ATLAS9 grid files](https://wwwuser.oats.inaf.it/fiorella.castelli/grids/gridp00k2odfnew/ap00k2tab.html)
 
+Use `--output-atlas trial.dat --atlas-format atlas12` for the Castelli ATLAS12 punch layout. It uses the same `READ DECK6` depth convention with nine columns and includes a separate `ABUNDANCE TABLE` with the model's uniform mixture. The reference ATLAS12 reader supports at most 72 depth points. Give ATLAS12 the uncompressed file with `READ PUNCH`. The export describes the GiantLayers atmosphere and retains its native depth grid. [ATLAS12 source and input examples](https://wwwuser.oats.inaf.it/fiorella.castelli/sources/atlas12.html)
+
 Use the reference atmosphere runs above to benchmark differences from MARCS. The experimental solver uses a limited species and opacity set and a prescribed radial column-mass grid. Inspect sensitivity to the chosen outer pressure, bottom mass, and transfer grids before using the result quantitatively.
 
 
