@@ -24,7 +24,8 @@ def _bracket(axis, value):
 class MolecularCrossSection:
     """Cross sections in cm² per isotopologue on a T, pressure, wavelength grid."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, omit_hot=False):
+        self.omit_hot = omit_hot
         path = Path(path)
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8") as stream:
@@ -70,7 +71,7 @@ class MolecularCrossSection:
         density = gas.number_densities.get(self.species)
         if density is None:
             raise ValueError(f"Missing chemistry data for {self.species}")
-        if density == 0:
+        if density == 0 or (self.omit_hot and gas.temperature > self.temperatures[-1]):
             return [0.0] * len(grid)
         it, ft = _bracket(self.temperatures, gas.temperature)
         ip, fp = _bracket(self.log_pressures, math.log(pressure))

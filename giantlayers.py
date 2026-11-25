@@ -169,6 +169,8 @@ def main():
     parser.add_argument("--mass", type=float, required=True, help="Mass in solar masses")
     parser.add_argument("--lines", type=Path, help="Atomic line-list CSV")
     parser.add_argument("--molecular-cross-section", action="append", default=[], type=Path)
+    parser.add_argument("--test-omit-hot-opacity", action="append", default=[], type=Path,
+                        metavar="TABLE", help="Stress test: omit this molecular table above its maximum temperature")
     parser.add_argument("--cia", action="append", default=[], type=Path,
                         help="HITRAN collision-induced absorption table, repeatable")
     parser.add_argument("--layers", type=int, default=56)
@@ -227,6 +229,15 @@ def main():
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         if args.equilibrate_surface < 0:
             raise ValueError("Use a nonnegative number of surface correction passes")
+        omitted = {path.resolve() for path in args.test_omit_hot_opacity}
+        if omitted:
+            if (args.steps != 0 or args.equilibrate_surface or not args.restart_csv
+                    or args.photospheric_anchor or args.radiative_force):
+                raise ValueError("--test-omit-hot-opacity requires --steps 0 and --restart-csv with structure and temperature updates disabled")
+            if args.output_model:
+                raise ValueError("The hot-opacity stress test supports diagnostic output only")
+            if not omitted <= {path.resolve() for path in args.molecular_cross_section}:
+                raise ValueError("Each --test-omit-hot-opacity table must also be supplied with --molecular-cross-section")
         minimum_tau = args.min_bottom_rosseland_tau
         if minimum_tau is not None and (not math.isfinite(minimum_tau) or minimum_tau <= 0):
             raise ValueError("Minimum bottom Rosseland depth must be positive and finite")
@@ -247,7 +258,14 @@ def main():
         stages = [(args.stride, scale) for scale in args.opacity_ramp]
         stages.extend((stride, 1.0) for stride in strides)
         lines = read_lines(args.lines) if args.lines else ()
-        molecular = [MolecularCrossSection(path) for path in args.molecular_cross_section]
+        molecular = [
+            MolecularCrossSection(path, omit_hot=path.resolve() in omitted)
+            for path in args.molecular_cross_section
+        ]
+        for table in molecular:
+            if table.omit_hot:
+                print(f"Stress test: omitting {table.isotopologue} cross sections above "
+                      f"{table.temperatures[-1]:g} K", file=sys.stderr)
         cia = [HitranCIA(path) for path in args.cia]
         known_cia = boundary.chemistry.atoms.keys() | boundary.chemistry.molecules.keys()
         if any(not set(table.species) <= known_cia for table in cia):
@@ -403,8 +421,9 @@ def main():
         for table in molecular:
             cold, hot, low, high = table.clamped_layers(model.structure)
             if any((cold, hot, low, high)):
-                print(f"{table.isotopologue} boundary opacity used in layers outside tabulated "
-                      f"T (cold {cold}, hot {hot}) or P (low {low}, high {high})",
+                hot_policy = "omitted" if table.omit_hot else "clamped"
+                print(f"{table.isotopologue} layers outside tabulated T "
+                      f"(cold {cold}, hot {hot} {hot_policy}) or P (low {low}, high {high})",
                       file=sys.stderr)
         for table in cia:
             outside = sum(not table.temperatures[0] <= row[3] <= table.temperatures[-1]
