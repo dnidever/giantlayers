@@ -5,6 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
 import csv
 from dataclasses import dataclass, replace
+from functools import lru_cache, partial
 import json
 import math
 from multiprocessing import get_context
@@ -24,6 +25,9 @@ from odf_transfer import planck_nu
 from spherical_hydrostatic import boundary_from_marcs, increments, integrate, reconstruct_for_transfer
 from spherical_kernel_loader import CompiledKernel, ScatteringIterationLimit
 from spherical_transfer import disk_rays, impact_parameters
+
+
+MIN_WAVELENGTHS_PER_BAND = 2048
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,27 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
              include_scattering=True, chemistry=None, kernel_path=None, native_convection=False,
              hydrostatic_force=(), surface_sample=None, line_scale=1.0, surface_mean_sample=None):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
+    frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
+    prepared = prepare_transfer(model, lines, composition, core_rays, vmic, chemistry, kernel_path)
+    sums = integrate_band(prepared, wavelengths, frequencies, weights, tables, include_scattering,
+                          native_convection, line_scale, surface_sample, surface_mean_sample)
+    return finish_transfer(model, composition, chemistry, hydrostatic_force,
+                           prepared.radii, prepared.density, sums, native_convection)
+
+
+@dataclass(frozen=True)
+class PreparedTransfer:
+    reference_radius: float
+    radii: list
+    rays: tuple
+    solver: object
+    widths: list
+    layers: list
+    temperatures: list
+    density: list
+
+
+def prepare_transfer(model, lines, composition, core_rays, vmic, chemistry, kernel_path):
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
     reference_radius = float(model.header[7].split()[0])
@@ -194,10 +219,29 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     rays = angular_geometry(radii, core_rays)
     solver = CompiledKernel(kernel_path, rays) if kernel_path else solve_wavelength
     widths = [a - b for a, b in zip(radii, radii[1:])]
-    frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
     layers = list(prepare_layers(model, lines, composition, vmic, chemistry))
     temperatures = [layer[0].temperature for layer in layers]
     density = [layer[0].mass_density for layer in layers]
+    return PreparedTransfer(reference_radius, radii, rays, solver, widths, layers, temperatures, density)
+
+
+@dataclass
+class TransferSums:
+    flux: list
+    heating: list
+    iterations: int
+    acceleration: list
+    rosseland_weight: list
+    rosseland_inverse: list
+    emission: list
+
+
+def integrate_band(prepared, wavelengths, frequencies, weights, tables, include_scattering,
+                   native_convection, line_scale, surface_sample, surface_mean_sample):
+    layers, temperatures = prepared.layers, prepared.temperatures
+    rays, widths, density = prepared.rays, prepared.widths, prepared.density
+    solver = prepared.solver
+    surface_scale = (prepared.radii[0]/prepared.reference_radius)**2
     flux = [0.0] * len(layers)
     heating = [0.0] * len(layers)
     max_iterations = 0
@@ -233,7 +277,7 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
             except RuntimeError as exc:
                 raise RuntimeError(f"At {nu:.8g} Hz, {exc}") from exc
             if surface_sample is not None:
-                surface_sample(wavelength, nu, weight, f[0]*(radii[0]/reference_radius)**2)
+                surface_sample(wavelength, nu, weight, f[0]*surface_scale)
             if surface_mean_sample is not None:
                 surface_mean_sample(wavelength, nu, weight, mean[0])
             max_iterations = max(max_iterations, iterations)
@@ -242,69 +286,78 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
                 heating[i] += weight * local_heating
                 if native_convection:
                     radiative_acceleration[i] += weight*local_flux*(absorption[i]+scattering[i])/LIGHT
-    luminosity, shells, mismatch = shell_energy_budget(radii, density, flux, heating)
-    result = (flux, heating, luminosity, shells, max_iterations, mismatch)
+    return TransferSums(flux, heating, max_iterations, radiative_acceleration,
+                        rosseland_weight, rosseland_inverse, emission)
+
+
+def finish_transfer(model, composition, chemistry, hydrostatic_force, radii, density,
+                    sums, native_convection):
+    luminosity, shells, mismatch = shell_energy_budget(radii, density, sums.flux, sums.heating)
+    result = (sums.flux, sums.heating, luminosity, shells, sums.iterations, mismatch)
     if native_convection:
-        means = [a / b for a, b in zip(rosseland_weight, rosseland_inverse)]
+        means = [a / b for a, b in zip(sums.rosseland_weight, sums.rosseland_inverse)]
         convection = tuple(evaluate_convection(model, composition, means, chemistry, hydrostatic_force))
-        normalized_heating = tuple(q/e if e else 0.0 for q, e in zip(heating, emission))
-        return (*result, tuple(row[11] for row in convection), convection, normalized_heating,
-                tuple(radiative_acceleration), (rosseland_weight, rosseland_inverse, emission, density))
+        normalized = tuple(q/e if e else 0.0 for q, e in zip(sums.heating, sums.emission))
+        return (*result, tuple(row[11] for row in convection), convection, normalized,
+                tuple(sums.acceleration), (sums.rosseland_weight, sums.rosseland_inverse,
+                                           sums.emission, density))
     return result
 
 
-def evaluate_band(arguments, line_scale, collect_surface_mean, collect_surface_flux):
+def initialize_band_worker(model, lines, mixture, core_rays, vmic, chemistry, kernel_path, tables):
+    global _worker_band
+    prepare = partial(prepare_transfer, model, lines, mixture, core_rays, vmic, chemistry, kernel_path)
+    _worker_band = (lru_cache(maxsize=1)(prepare), tables)
+
+
+def evaluate_band(wavelengths, frequencies, weights, line_scale, collect_surface_mean, collect_surface_flux):
+    prepare, tables = _worker_band
+    prepared = prepare()
     means, fluxes = [], []
     mean_callback = (lambda wave, nu, weight, mean: means.append(mean)) if collect_surface_mean else None
     flux_callback = (lambda wave, nu, weight, flux: fluxes.append(flux)) if collect_surface_flux else None
-    result = evaluate(*arguments, line_scale=line_scale,
-                      surface_sample=flux_callback, surface_mean_sample=mean_callback)
-    return result, means, fluxes
+    sums = integrate_band(prepared, wavelengths, frequencies, weights, tables, True, True,
+                          line_scale, flux_callback, mean_callback)
+    return sums, prepared.density, means, fluxes
 
 
 def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmic,
                       chemistry, kernel_path, workers, hydrostatic_force=(), line_scale=1.0,
                       surface_mean_sample=None, surface_sample=None):
-    """Integrate a fixed native atmosphere over overlapping wavelength bands."""
+    """Integrate independent wavelength bands using weights from the full supplied grid."""
     if len(wavelengths) < 2 or workers < 2:
         raise ValueError("Parallel transfer requires two or more wavelengths and workers")
     count = min(workers, len(wavelengths)-1)
-    indices = [(len(wavelengths)-1)*i//count for i in range(count+1)]
-    with ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn")) as executor:
+    # Equal-length bands have unequal transfer costs. Queue extra work on large grids
+    # while keeping the number of small tasks low for coarsely sampled fits.
+    bands = max(count, min(4*count, len(wavelengths)//MIN_WAVELENGTHS_PER_BAND))
+    indices = [len(wavelengths)*i//bands for i in range(bands+1)]
+    frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
+    with ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn"),
+                             initializer=initialize_band_worker,
+                             initargs=(model, lines, mixture, core_rays, vmic, chemistry, kernel_path,
+                                       tables)) as executor:
         futures = [
-            executor.submit(evaluate_band,
-                            (model, wavelengths[a:b+1], lines, mixture, tables, core_rays, vmic,
-                             True, chemistry, kernel_path, True, hydrostatic_force),
+            executor.submit(evaluate_band, wavelengths[a:b], frequencies[a:b], weights[a:b],
                             line_scale, surface_mean_sample is not None, surface_sample is not None)
             for a, b in zip(indices, indices[1:])
         ]
-        parts, band_means, band_fluxes = zip(*(future.result() for future in futures))
-    if surface_sample is not None or surface_mean_sample is not None:
-        frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
-        for callback, bands in ((surface_mean_sample, band_means), (surface_sample, band_fluxes)):
-            if callback is not None:
-                values = (value for i, band in enumerate(bands) for value in (band[1:] if i else band))
-                for sample in zip(wavelengths, frequencies, weights, values):
-                    callback(*sample)
-    # The shared endpoints carry half-weights for the two neighboring
-    # intervals. Their sum yields the original wavelength quadrature.
-    flux = [math.fsum(values) for values in zip(*(part[0] for part in parts))]
-    heating = [math.fsum(values) for values in zip(*(part[1] for part in parts))]
-    acceleration = [math.fsum(values) for values in zip(*(part[9] for part in parts))]
-    numerator, denominator, emission = (
-        [math.fsum(values) for values in zip(*(part[10][i] for part in parts))]
-        for i in range(3)
-    )
-    density = parts[0][10][3]
+        parts, densities, band_means, band_fluxes = zip(*(future.result() for future in futures))
+    for callback, samples in ((surface_mean_sample, band_means), (surface_sample, band_fluxes)):
+        if callback is not None:
+            values = (value for band in samples for value in band)
+            for sample in zip(wavelengths, frequencies, weights, values):
+                callback(*sample)
+
+    def merge(field):
+        return [math.fsum(values) for values in zip(*(getattr(part, field) for part in parts))]
+
+    sums = TransferSums(merge("flux"), merge("heating"), max(part.iterations for part in parts),
+                        merge("acceleration"), merge("rosseland_weight"), merge("rosseland_inverse"),
+                        merge("emission"))
     radius = float(model.header[7].split()[0])
     radii = [radius-row[2] for row in model.structure]
-    luminosity, shells, mismatch = shell_energy_budget(radii, density, flux, heating)
-    means = [a/b for a, b in zip(numerator, denominator)]
-    convection = tuple(evaluate_convection(model, mixture, means, chemistry, hydrostatic_force))
-    normalized = tuple(q/e if e else 0.0 for q, e in zip(heating, emission))
-    return (flux, heating, luminosity, shells, max(part[4] for part in parts), mismatch,
-            tuple(row[11] for row in convection), convection, normalized, acceleration,
-            (numerator, denominator, emission, density))
+    return finish_transfer(model, mixture, chemistry, hydrostatic_force, radii, densities[0], sums, True)
 
 
 def surface_equilibrium_temperature(model, wavelengths, field, lines, tables, vmic, chemistry):

@@ -236,3 +236,11 @@ Temperature Jacobian refreshes now share one worker pool per coupled fit, so suc
 On the 3,500 K, log g = −0.5 profile, the median CPU time for hydrostatic reconstruction fell from 1.31 to 0.89 seconds across seven matched pairs with identical results. In a separate four-worker fit with two Jacobian refreshes and 631 wavelengths, reusing workers reduced wall time from 37.7 to 30.0 seconds with identical temperature profiles, transfer diagnostics, and convergence histories. A zero-step check on all 100,724 wavelengths reproduced the pre-optimization balance CSV byte for byte, including the 0.954% peak luminosity residual.
 
 Restart cache keys include the solver source. The first run after this update will rebuild an older calibration cache.
+
+## Full-grid wavelength scheduling
+
+On large grids, parallel transfer queues up to four wavelength bands per worker. Each worker prepares the same atmosphere and opacity inputs once, then evaluates whichever band it receives next. The solver computes quadrature weights on the complete wavelength grid and passes them to the workers, so every wavelength contributes once. Band results are combined in wavelength order before evaluating convection with the full-grid Rosseland mean. Changing the band boundaries can change floating-point rounding in the integrated diagnostics.
+
+For a multistage continuation, use the same `--transfer-cache` path in every stage and pass the preceding stage's verified CSV as the next `--restart-csv`. A cache hit reuses the preceding full-grid luminosity and heating residuals for the starting calibration. Each stage still verifies its final model independently on the full grid.
+
+A timed three-stage solve at 3,500 K and log g = −0.5 used 56 layers, 631 fitting wavelengths, four workers, and 100,724 wavelengths for verification. The first full-grid calibration from the same MARCS-seeded profile went from 111.1 seconds with four bands to 85.8 seconds with 16 bands. Reusing calibration at both stage handoffs reduced the number of full-grid calls from six to four. Total elapsed time for the two benchmark runs was 22 minutes 6 seconds and 16 minutes 7 seconds, respectively. Both reached a verified peak luminosity residual of 0.955%. The final temperatures differed by at most 0.0000051 K.

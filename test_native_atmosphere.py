@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from collision_induced import HitranCIA
 from giantlayers import initialize, restart_temperatures
@@ -47,9 +48,10 @@ class NativeAtmosphereChecks(unittest.TestCase):
         serial = evaluate(model, wavelength, (), {}, core_rays=4, chemistry=boundary.chemistry,
                           native_convection=True, surface_mean_sample=lambda *x: serial_samples.append(x),
                           surface_sample=lambda *x: serial_flux.append(x))
-        parallel = evaluate_parallel(model, wavelength, (), {}, (), 4, 2, boundary.chemistry, None, 2,
-                                     surface_mean_sample=lambda *x: parallel_samples.append(x),
-                                     surface_sample=lambda *x: parallel_flux.append(x))
+        with patch("spherical_heating.MIN_WAVELENGTHS_PER_BAND", 2):
+            parallel = evaluate_parallel(model, wavelength, (), {}, (), 4, 2, boundary.chemistry, None, 2,
+                                         surface_mean_sample=lambda *x: parallel_samples.append(x),
+                                         surface_sample=lambda *x: parallel_flux.append(x))
         self.assertEqual(serial_samples, parallel_samples)
         self.assertEqual(serial_flux, parallel_flux)
         for i in (0, 1, 6, 8, 9):
