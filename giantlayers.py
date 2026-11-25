@@ -207,6 +207,8 @@ def main():
                         help="Exit with status 2 if the computed bottom Rosseland depth is smaller")
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
+    parser.add_argument("--bracket-bottom-flux", action="store_true",
+                        help="Stabilize the deepest luminosity residual with a bounded temperature correction")
     parser.add_argument("--temperature-smoothness", type=float, default=0.0,
                         help="Penalize short-scale log-temperature curvature during the fit")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
@@ -343,6 +345,7 @@ def main():
                     line_scale=line_scale, jacobian_workers=args.workers,
                     flux_offset=flux_offset, heating_offset=heating_offset, heating_scale=heating_scale,
                     temperature_smoothness=args.temperature_smoothness,
+                    bracket_bottom_flux=args.bracket_bottom_flux,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
