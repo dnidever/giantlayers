@@ -188,7 +188,7 @@ def main():
                         help="Steps between finite-difference Jacobian refreshes")
     parser.add_argument("--kernel", type=Path, help="Optional compiled spherical transfer library")
     parser.add_argument("--workers", type=int, default=1,
-                        help="Process count for fixed-profile transfer and full-grid verification")
+                        help="Process count for Jacobian perturbations and fixed-profile transfer")
     parser.add_argument("--flux-tolerance", type=float, default=0.01,
                         help="Maximum fractional luminosity error for convergence")
     parser.add_argument("--require-flux-convergence", action="store_true",
@@ -203,6 +203,8 @@ def main():
     parser.add_argument("--checkpoint-csv", type=Path, help="Save a restart CSV after each accepted correction")
     parser.add_argument("--verify-full", action="store_true",
                         help="Check the final profile at all input wavelengths")
+    parser.add_argument("--full-grid-correction", action="store_true",
+                        help="Calibrate the final sampled-grid fit with a full-grid transfer")
     parser.add_argument("--photospheric-anchor", action="store_true",
                         help="Set the reference gravity at the computed Rosseland photosphere")
     parser.add_argument("--radiative-force", action="store_true",
@@ -244,12 +246,13 @@ def main():
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
 
-        def transfer_on_grid(surface_sample=None, line_scale=1.0):
+        def transfer_on_grid(surface_sample=None, line_scale=1.0, grid=None):
+            grid = wavelengths if grid is None else grid
             if args.workers > 1 and surface_sample is None:
-                return evaluate_parallel(model, wavelengths, lines, {}, tables, args.core_rays,
+                return evaluate_parallel(model, grid, lines, {}, tables, args.core_rays,
                                          args.vmic, boundary.chemistry, args.kernel, args.workers,
                                          boundary.radiative_acceleration, line_scale)
-            return evaluate(model, wavelengths, lines, {}, tables, args.core_rays,
+            return evaluate(model, grid, lines, {}, tables, args.core_rays,
                             args.vmic, chemistry=boundary.chemistry,
                             kernel_path=args.kernel, native_convection=True,
                             hydrostatic_force=boundary.radiative_acceleration,
@@ -261,6 +264,16 @@ def main():
             print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride}, "
                   f"line opacity {line_scale:.0%})",
                   file=sys.stderr, flush=True)
+            flux_offset = ()
+            if args.full_grid_correction and index == len(stages) and args.steps > 0 and wavelengths != reference:
+                print(f"Calibrating the residuals on {len(reference):,} wavelengths",
+                      file=sys.stderr, flush=True)
+                model, _ = reconstruct_for_transfer(model, boundary=boundary)
+                sampled = total_flux_budget(model, transfer_on_grid(), True)
+                exact = total_flux_budget(model, transfer_on_grid(grid=reference), True)
+                flux_offset = tuple(b[-1]-a[-1] for a, b in zip(sampled, exact))
+                print("Iteration errors use the calibrated luminosity target",
+                      file=sys.stderr, flush=True)
             if args.steps == 0 and args.workers > 1:
                 model, _ = reconstruct_for_transfer(model, boundary=boundary)
                 result = transfer_on_grid(line_scale=line_scale)
@@ -276,12 +289,12 @@ def main():
                     outer_heating_weight=args.outer_heating_weight,
                     on_accept=checkpoint if args.checkpoint_csv else None,
                     adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
-                    line_scale=line_scale,
+                    line_scale=line_scale, jacobian_workers=args.workers, flux_offset=flux_offset,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
                                               args.radiative_force)
-        if args.verify_full and wavelengths != reference:
+        if (args.verify_full or args.full_grid_correction) and wavelengths != reference:
             print(f"Verifying on {len(reference):,} wavelengths", file=sys.stderr, flush=True)
             wavelengths = reference
 

@@ -335,7 +335,9 @@ Use `--adaptive-knots 4` to allow up to four additional temperature controls at 
 
 For mixtures that strongly change the line blanketing, start with reduced line opacity using `--opacity-ramp 0.1 0.5`. GiantLayers solves on the startup wavelength grid at each supplied fraction, then at full line opacity. The continuum and LTE chemistry are evaluated throughout. The optional finer wavelength stages use full opacity.
 
-Use `--workers 4` for a fixed-profile calculation with `--steps 0` or an integrated `--verify-full` evaluation. The processes integrate separate wavelength bands and combine the flux, Rosseland moments, and radiative acceleration. Temperature corrections and spectrum output use the serial path.
+Use `--workers 4` to distribute finite-difference temperature perturbations among processes. For a fixed-profile `--steps 0` or `--verify-full` evaluation, the processes integrate separate wavelength bands and combine the flux, Rosseland moments, and radiative acceleration. Spectrum output uses a serial sweep.
+
+Use `--full-grid-correction` to calibrate the last sampled stage against a transfer on the complete input grid. The solver holds the initial difference between the sampled and full-grid luminosity residuals fixed while it computes temperature corrections on the sampled grid. The command then recomputes the final luminosity on the full grid and reports the measured residual.
 
 ### Export the emergent spectrum
 
@@ -344,3 +346,23 @@ Pass `--output-spectrum spectrum.csv` to evaluate the final atmosphere and write
 ### Add hydrogen and helium collision-induced absorption
 
 Download the rectangular H₂–H₂, H₂–He, H₂–H, and He–H files from HITRAN and pass each selected pair with `--cia FILE.cia`. The reader also accepts gzip-compressed tables. It interpolates in temperature and wavenumber, then multiplies the coefficient by the two LTE species number densities and divides by mass density. CIA is continuum absorption and retains its full weight during an opacity ramp. Temperature outside a table's axis uses the nearest tabulated value. Wavenumbers outside the tabulated range contribute zero. [HITRAN CIA files](https://hitran.org/cia/) · [Format and reference data](https://hitran.org/data/CIA/CIA_Readme_2024.pdf)
+
+
+### Use the solver from Python
+
+```python
+import json
+from giantlayers import initialize
+from native_transfer import read_wavelengths
+from spherical_heating import balance_all_layers
+
+with open("examples/solar-gs98.json") as stream:
+    abundances = json.load(stream)
+seed, boundary = initialize(3500, 1, 1, abundances, layers=12)
+wavelengths = read_wavelengths("examples/continuum-wavelengths.dat")
+model, diagnostics, history, knots, convective_start = balance_all_layers(
+    seed, wavelengths, (), {}, boundary=boundary, core_rays=12, steps=1
+)
+```
+
+This example makes one correction with continuum extinction. Pass loaded atomic transitions through the third argument and loaded molecular tables through `tables`. When supplying your own initial seed and boundary, use the same abundance mixture in the structure and opacity calculations.

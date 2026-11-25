@@ -1,0 +1,6 @@
+include LICENSE
+include mkdocs.yml .readthedocs.yaml
+include spherical_kernel.c
+include test_*.py
+recursive-include docs *.md *.txt
+recursive-include examples *.json *.dat

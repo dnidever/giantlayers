@@ -456,11 +456,54 @@ def update_columns(columns, step, previous, current):
     return [[x + dx*r for x, r in zip(column, remainder)] for dx, column in zip(step, columns)]
 
 
+@dataclass(frozen=True)
+class TrialTransfer:
+    boundary: object
+    wavelengths: tuple
+    lines: tuple
+    mixture: dict
+    tables: tuple
+    core_rays: int
+    vmic: float
+    scattering: bool
+    chemistry: Thermochemistry
+    kernel_path: Path
+    line_scale: float
+    luminosity_target: float
+    flux_offset: tuple = ()
+
+    def __call__(self, profile):
+        current, _ = reconstruct_for_transfer(profile, boundary=self.boundary)
+        force = getattr(self.boundary, "radiative_acceleration", ())
+        result = evaluate(current, self.wavelengths, self.lines, self.mixture, self.tables,
+                          self.core_rays, self.vmic, self.scattering, self.chemistry,
+                          self.kernel_path, True, force, None, self.line_scale)
+        radius = self.boundary.reference_radius
+        convection = [
+            4*math.pi*(radius-row[2])**2*flux/self.luminosity_target
+            for row, flux in zip(current.structure, result[6])
+        ]
+        offset = self.flux_offset or (0.0,)*len(convection)
+        residual = [r/self.luminosity_target + c - 1 + adjustment
+                    for r, c, adjustment in zip(result[2], convection, offset)]
+        return current, result, residual, convection
+
+
+def initialize_trial_worker(transfer):
+    global _worker_transfer
+    _worker_transfer = transfer
+
+
+def run_trial(profile):
+    return _worker_transfer(profile)
+
+
 def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
-                       on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0):
+                       on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
+                       jacobian_workers=1, flux_offset=()):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -474,6 +517,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         raise ValueError("Adaptive temperature controls and peak error weight must be nonnegative")
     if not math.isfinite(line_scale) or not 0 <= line_scale <= 1:
         raise ValueError("Line opacity scale must be in [0, 1]")
+    if jacobian_workers < 1:
+        raise ValueError("Use at least one worker for the temperature Jacobian")
     if boundary is None:
         chemistry = Thermochemistry()
         boundary, _ = boundary_from_marcs(model, chemistry, composition)
@@ -482,21 +527,16 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     radius = boundary.reference_radius
     luminosity_target = 4 * math.pi * radius**2 * float(model.header[2].split()[0])
     baseline = model.structure
+    flux_offset = tuple(flux_offset) or (0.0,)*len(baseline)
+    if len(flux_offset) != len(baseline) or not all(map(math.isfinite, flux_offset)):
+        raise ValueError("The luminosity offset must contain a finite value at every layer")
     axis = tuple(row[0] for row in baseline)
     if any(a >= b for a, b in zip(axis, axis[1:])):
         raise ValueError("Reference log Rosseland depth must increase inward")
 
-    def evaluate_trial(profile):
-        current, _ = reconstruct_for_transfer(profile, boundary=boundary)
-        force = getattr(boundary, "radiative_acceleration", ())
-        result = evaluate(current, wavelengths, lines, composition, tables, core_rays,
-                          vmic, include_scattering, chemistry, kernel_path, True, force, None, line_scale)
-        convection = [
-            4 * math.pi * (radius-row[2])**2 * flux / luminosity_target
-            for row, flux in zip(current.structure, result[6])
-        ]
-        residual = [r/luminosity_target + c - 1 for r, c in zip(result[2], convection)]
-        return current, result, residual, convection
+    evaluate_trial = TrialTransfer(boundary, wavelengths, lines, composition, tables, core_rays,
+                                   vmic, include_scattering, chemistry, kernel_path,
+                                   line_scale, luminosity_target, flux_offset)
 
     def metrics(residual):
         return (math.sqrt(math.fsum(x*x for x in residual)/len(residual)),
@@ -522,7 +562,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     if progress is not None:
         progress(0, history[-1])
 
-    def trial(values):
+    def trial_profile(values):
         correction = interpolate_corrections(axis, knots, values)
         structure = tuple(
             (*row[:3], row[3]*(1+x), *row[4:]) for row, x in zip(baseline, correction)
@@ -530,20 +570,30 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         if any(not chemistry.temperatures[0] <= row[3] <= chemistry.temperatures[-1]
                for row in structure):
             return None
-        return evaluate_trial(replace(model, structure=structure))
+        return replace(model, structure=structure)
 
     def finite_difference():
-        columns = []
+        profiles, deltas = [], []
         for i in range(len(knots)):
             perturb = parameters.copy()
             perturb[i] += 0.001
-            shifted = trial(perturb)
-            if shifted is None:
+            profile = trial_profile(perturb)
+            if profile is None:
                 perturb[i] -= 0.002
-                shifted = trial(perturb)
-            if shifted is None:
+                profile = trial_profile(perturb)
+            if profile is None:
                 raise RuntimeError("Cannot perturb a temperature knot within the LTE table")
-            delta = perturb[i] - parameters[i]
+            profiles.append(profile)
+            deltas.append(perturb[i] - parameters[i])
+        if jacobian_workers == 1:
+            results = list(map(evaluate_trial, profiles))
+        else:
+            with ProcessPoolExecutor(max_workers=min(jacobian_workers, len(profiles)),
+                                     mp_context=get_context("spawn"), initializer=initialize_trial_worker,
+                                     initargs=(evaluate_trial,)) as executor:
+                results = list(executor.map(run_trial, profiles))
+        columns = []
+        for shifted, delta in zip(results, deltas):
             trial_residual = objective(shifted[1], shifted[2])
             columns.append([(b-a)/delta for a, b in zip(residual, trial_residual)])
         return columns
@@ -556,8 +606,9 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         scale = 1.0
         for _ in range(6):
             candidate = [p + scale*d for p, d in zip(parameters, direction)]
-            proposed = trial(candidate)
-            if proposed is not None:
+            profile = trial_profile(candidate)
+            if profile is not None:
+                proposed = evaluate_trial(profile)
                 proposed_residual = objective(proposed[1], proposed[2])
                 if merit(proposed_residual) < previous_merit:
                     return candidate, proposed, proposed_residual
