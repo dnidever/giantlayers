@@ -2,6 +2,7 @@
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 import csv
 from dataclasses import dataclass, replace
 import json
@@ -738,7 +739,10 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             return None
         return replace(model, structure=structure)
 
-    def finite_difference():
+    executor = None
+
+    def finite_difference(workers):
+        nonlocal executor
         if jacobian_progress is not None:
             jacobian_progress(len(knots))
         profiles, deltas = [], []
@@ -756,10 +760,13 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         if jacobian_workers == 1:
             results = list(map(evaluate_trial, profiles))
         else:
-            with ProcessPoolExecutor(max_workers=min(jacobian_workers, len(profiles)),
-                                     mp_context=get_context("spawn"), initializer=initialize_trial_worker,
-                                     initargs=(evaluate_trial,)) as executor:
-                results = list(executor.map(run_trial, profiles))
+            if executor is None:
+                executor = workers.enter_context(ProcessPoolExecutor(
+                    max_workers=min(jacobian_workers, len(profiles)),
+                    mp_context=get_context("spawn"), initializer=initialize_trial_worker,
+                    initargs=(evaluate_trial,),
+                ))
+            results = list(executor.map(run_trial, profiles))
         columns = []
         for shifted, delta in zip(results, deltas):
             trial_residual = objective(shifted[0].structure, shifted[1], shifted[2])
@@ -807,47 +814,48 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
 
     columns = None
     steps_since_refresh = 0
-    for step in range(steps):
-        if max(map(abs, residual)) <= flux_tolerance:
-            break
-        refresh_due = (steps_since_refresh >= 2*jacobian_interval if adaptive_jacobian
-                       else step % jacobian_interval == 0)
-        fresh = columns is None or refresh_due
-        if fresh:
-            columns = finite_difference()
-            steps_since_refresh = 0
-        accepted = line_search(temperature_direction(columns, residual))
-        if accepted is None and not fresh:
-            columns = finite_difference()
-            steps_since_refresh = 0
+    with ExitStack() as workers:
+        for step in range(steps):
+            if max(map(abs, residual)) <= flux_tolerance:
+                break
+            refresh_due = (steps_since_refresh >= 2*jacobian_interval if adaptive_jacobian
+                           else step % jacobian_interval == 0)
+            fresh = columns is None or refresh_due
+            if fresh:
+                columns = finite_difference(workers)
+                steps_since_refresh = 0
             accepted = line_search(temperature_direction(columns, residual))
-        if accepted is None:
-            accepted = line_search(merit_descent(columns, residual, len(baseline), peak_weight))
-        if accepted is None:
-            break
-        candidate, (current, result, flux_residual, _), next_residual = accepted
-        if adaptive_jacobian or jacobian_interval > 1:
-            delta = [b-a for a, b in zip(parameters, candidate)]
-            if adaptive_jacobian and jacobian_prediction_error(columns, delta, residual, next_residual) > 0.5:
-                columns = None
-            else:
-                columns = update_columns(columns, delta, residual, next_residual)
-        steps_since_refresh += 1
-        parameters, residual = candidate, next_residual
-        history.append(metrics(flux_residual))
-        if progress is not None:
-            progress(len(history)-1, history[-1])
-        if on_accept is not None:
-            on_accept(current, result)
-        if adaptive_knots and step + 1 < steps:
-            worst = max((i for i in range(len(axis)) if i not in knots),
-                        key=lambda i: abs(flux_residual[i]), default=None)
-            if worst is not None and abs(flux_residual[worst]) > max(flux_tolerance, 0.7*history[-1][1]):
-                correction = interpolate_corrections(axis, knots, parameters)
-                knots = tuple(sorted((*knots, worst)))
-                parameters = [correction[i] for i in knots]
-                columns = None
-                adaptive_knots -= 1
+            if accepted is None and not fresh:
+                columns = finite_difference(workers)
+                steps_since_refresh = 0
+                accepted = line_search(temperature_direction(columns, residual))
+            if accepted is None:
+                accepted = line_search(merit_descent(columns, residual, len(baseline), peak_weight))
+            if accepted is None:
+                break
+            candidate, (current, result, flux_residual, _), next_residual = accepted
+            if adaptive_jacobian or jacobian_interval > 1:
+                delta = [b-a for a, b in zip(parameters, candidate)]
+                if adaptive_jacobian and jacobian_prediction_error(columns, delta, residual, next_residual) > 0.5:
+                    columns = None
+                else:
+                    columns = update_columns(columns, delta, residual, next_residual)
+            steps_since_refresh += 1
+            parameters, residual = candidate, next_residual
+            history.append(metrics(flux_residual))
+            if progress is not None:
+                progress(len(history)-1, history[-1])
+            if on_accept is not None:
+                on_accept(current, result)
+            if adaptive_knots and step + 1 < steps:
+                worst = max((i for i in range(len(axis)) if i not in knots),
+                            key=lambda i: abs(flux_residual[i]), default=None)
+                if worst is not None and abs(flux_residual[worst]) > max(flux_tolerance, 0.7*history[-1][1]):
+                    correction = interpolate_corrections(axis, knots, parameters)
+                    knots = tuple(sorted((*knots, worst)))
+                    parameters = [correction[i] for i in knots]
+                    columns = None
+                    adaptive_knots -= 1
     return current, result, history, knots, convective_start
 
 

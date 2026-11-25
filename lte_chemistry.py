@@ -3,6 +3,7 @@
 from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib.resources import files
 import json
 import math
@@ -62,14 +63,10 @@ class Thermochemistry:
                 state = self._solve_equilibrium(t, gas_pressure, abundances, tolerance, state)
             return state
 
-    def _solve_equilibrium(self, temperature, gas_pressure, abundances, tolerance, initial):
-        if (not math.isfinite(temperature) or not self.temperatures[0] <= temperature <= self.temperatures[-1]
-                or not math.isfinite(gas_pressure) or gas_pressure <= 0):
-            raise ValueError("Temperature must lie in the chemistry grid and pressure must be positive")
-        if (abundances.get("H") != 12 or not abundances.keys() <= self.atoms.keys()
-                or not all(math.isfinite(value) for value in abundances.values())):
-            raise ValueError("Supply finite log epsilon abundances for known elements, with H=12")
-
+    @lru_cache(maxsize=512)
+    def _equilibrium_terms(self, temperature, abundance_items):
+        """Reuse exact mass-action terms across pressure solves at the same temperature."""
+        abundances = dict(abundance_items)
         molecules = {
             name: data for name, data in self.molecules.items()
             if all(e in abundances for e in data["atoms"])
@@ -81,9 +78,7 @@ class Thermochemistry:
         abundance_ratios = {e: 10 ** (value - 12) for e, value in abundances.items()}
         ratios = [abundance_ratios[e] for e in elements]
         e_index = len(elements)
-        size = e_index + 2
         kt = K_B * temperature
-        particles = gas_pressure / kt
         index = min(bisect_right(self.temperatures, temperature) - 1, len(self.temperatures) - 2)
         low, high = self.temperatures[index:index + 2]
         fraction = math.log(temperature / low) / math.log(high / low)
@@ -145,7 +140,28 @@ class Thermochemistry:
                           - math.log(4 * SAHA * temperature**1.5))
         add("H-", ("H",), ((h, 1), (e_index, 1)), log_attachment, charge=-1)
         add("e-", (), ((e_index, 1),), charge=-1)
+
+        mass_per_hydrogen = AMU * math.fsum(ratio*masses[e] for e, ratio in abundance_ratios.items())
+        return (elements, e_index, ratios, abundance_ratios, kt, species, elemental_terms,
+                positive, negative, atomic_only, q, masses, mass_per_hydrogen)
+
+    def _solve_equilibrium(self, temperature, gas_pressure, abundances, tolerance, initial):
+        if (not math.isfinite(temperature) or not self.temperatures[0] <= temperature <= self.temperatures[-1]
+                or not math.isfinite(gas_pressure) or gas_pressure <= 0):
+            raise ValueError("Temperature must lie in the chemistry grid and pressure must be positive")
+        if (abundances.get("H") != 12 or not abundances.keys() <= self.atoms.keys()
+                or not all(math.isfinite(value) for value in abundances.values())):
+            raise ValueError("Supply finite log epsilon abundances for known elements, with H=12")
+
+        (elements, e_index, ratios, abundance_ratios, kt, species, elemental_terms,
+         positive, negative, atomic_only, q, masses, mass_per_hydrogen) = self._equilibrium_terms(
+            temperature, tuple(abundances.items())
+        )
+        particles = gas_pressure / kt
+        size = e_index + 2
         all_particles = tuple((i, 1) for i in range(len(species)))
+        log_ratios = [math.log(ratio) for ratio in ratios]
+        log_particles = math.log(particles)
 
         def system(x):
             populations = [math.exp(c + sum(x[i] * p for i, p in powers))
@@ -179,9 +195,9 @@ class Thermochemistry:
                 return math.log(amount), [d / amount for d in derivative]
 
             residual, jacobian = [], []
-            for ratio, terms in zip(ratios, elemental_terms):
+            for log_ratio, terms in zip(log_ratios, elemental_terms):
                 amount, row = total(terms)
-                residual.append(amount - math.log(ratio) - x[-1])
+                residual.append(amount - log_ratio - x[-1])
                 row[-1] = -1.0
                 jacobian.append(row)
             pos, dpos = total(positive, net_positive, positive_derivative)
@@ -189,14 +205,13 @@ class Thermochemistry:
             residual.append(pos - neg)
             jacobian.append([a - b for a, b in zip(dpos, dneg)])
             number, row = total(all_particles, atomic_number)
-            residual.append(number - math.log(particles))
+            residual.append(number - log_particles)
             jacobian.append(row)
             return residual, jacobian, populations, neutral_and_ion
 
         nuclei_scale = particles / math.fsum(abundance_ratios.values())
         x = [math.log(r * nuclei_scale) for r in ratios]
         x.extend((math.log(particles * 1e-4), math.log(nuclei_scale)))
-        mass_per_hydrogen = AMU * math.fsum(ratio*masses[e] for e, ratio in abundance_ratios.items())
         if initial is not None:
             x = [math.log(initial.number_densities[e]) for e in elements]
             x.extend((math.log(initial.electron_density),
@@ -210,7 +225,7 @@ class Thermochemistry:
                 for (neutral, ion, _, _), (n, c) in zip(atomic_only, atomic_populations):
                     numbers[neutral], numbers[ion] = n, c
                 density = math.exp(x[-1]) * mass_per_hydrogen
-                return GasState(temperature, numbers["e-"], density, numbers, q, masses, error)
+                return GasState(temperature, numbers["e-"], density, numbers, q.copy(), masses.copy(), error)
             step = _linear_solve(jacobian, [-r for r in residual])
             scale = min(1.0, 4.0 / max(map(abs, step)))
             for _ in range(20):

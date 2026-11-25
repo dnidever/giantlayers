@@ -79,6 +79,18 @@ class NativeAtmosphereChecks(unittest.TestCase):
         self.assertAlmostEqual(particles*K_B*1000/1e5, 1.0, places=9)
         self.assertAlmostEqual(positive/negative, 1.0, places=9)
 
+    def test_reused_chemistry_terms_keep_pressure_and_composition_independent(self):
+        chemistry = Thermochemistry()
+        reference = Thermochemistry()
+        abundances = {"H": 12, "He": 10.93, "C": 8.4, "O": 8.7}
+        first = chemistry.solve(2700, 10, abundances)
+        first.partition_functions["H"] = -1
+        first.masses_amu["H"] = -1
+        for pressure, carbon in ((100, 8.4), (100, 9.1), (10, 8.4)):
+            mixture = dict(abundances, C=carbon)
+            self.assertEqual(chemistry.solve(2700, pressure, mixture),
+                             reference.solve(2700, pressure, mixture))
+
     def test_cia_interpolates_wavenumber_temperature_and_density(self):
         with TemporaryDirectory() as directory:
             path = Path(directory)/"pair.cia"
