@@ -95,4 +95,6 @@ Repeat a zero-step restart with `--test-omit-hot-opacity TABLE` to remove a sele
 
 For the 56-layer fiducial on 2,520 wavelength samples, omitting all four tables above 3,400 K shifted the layer luminosity residuals by as much as 4.50 percentage points relative to the sampled control. Tested individually, the largest shifts were 2.89 points for TiO, 1.72 for CO, 0.079 for H₂O, and 0.053 for VO. The control and joint stress test had maximum absolute residuals of 0.667% and 4.31%, respectively. These tests measure the leverage of the clamped opacity and prioritize TiO and CO for hotter tabulations. They do not estimate the error of the clamped cross sections against true high-temperature opacity.
 
+On all 100,724 MARCS wavelengths, the joint omission increased the maximum absolute luminosity residual from 0.851% to 4.167%. The largest shift was 4.374 percentage points in layer 41 at 3,551 K. The control and stress test used identical temperatures and column masses. The surface cooling fraction changed from 1.615% to 1.304% of local LTE emission.
+
 The [published TiO ToTo line list](https://doi.org/10.1093/mnras/stz1818) is designed for temperatures below 5,000 K. It can supply additional TiO cross-section slices beyond the 3,400 K limit of the imported grid.
