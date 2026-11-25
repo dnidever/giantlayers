@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 from tempfile import NamedTemporaryFile
 
+from atlas_writer import write_atlas
 from benchmark_sampling import nested_wavelengths
 from collision_induced import HitranCIA
 from gray_atmosphere import SIGMA
@@ -215,6 +216,7 @@ def main():
                         help="Choose the worst residual in this many deepest layers when bracketing")
     parser.add_argument("--temperature-smoothness", type=float, default=0.0,
                         help="Penalize short-scale log-temperature curvature during the fit")
+    parser.add_argument("--output-atlas", type=Path, help="Write an ATLAS9 DECK6 .dat or .dat.gz record")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
     parser.add_argument("--output-spectrum", type=Path, help="Write the emergent spectrum on the final grid")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
@@ -243,12 +245,18 @@ def main():
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         if args.equilibrate_surface < 0:
             raise ValueError("Use a nonnegative number of surface correction passes")
+        if args.output_atlas:
+            reserved = (args.wavelengths, args.abundances, args.lines, args.kernel, args.restart_csv,
+                        args.checkpoint_csv, args.output_model, args.output_spectrum,
+                        *args.molecular_cross_section, *args.cia)
+            if args.output_atlas.resolve() in {path.resolve() for path in reserved if path is not None}:
+                raise ValueError("The ATLAS export must use a separate file")
         omitted = {path.resolve() for path in args.test_omit_hot_opacity}
         if omitted:
             if (args.steps != 0 or args.equilibrate_surface or not args.restart_csv
                     or args.photospheric_anchor or args.radiative_force):
                 raise ValueError("--test-omit-hot-opacity requires --steps 0 and --restart-csv with structure and temperature updates disabled")
-            if args.output_model:
+            if args.output_model or args.output_atlas:
                 raise ValueError("The hot-opacity stress test supports diagnostic output only")
             if not omitted <= {path.resolve() for path in args.molecular_cross_section}:
                 raise ValueError("Each --test-omit-hot-opacity table must also be supplied with --molecular-cross-section")
@@ -275,7 +283,8 @@ def main():
         if args.transfer_cache:
             opacity_paths = [args.lines, args.kernel, *args.molecular_cross_section, None, *args.cia]
             reserved = [args.wavelengths, args.abundances, args.restart_csv,
-                        args.checkpoint_csv, args.output_model, args.output_spectrum, *opacity_paths]
+                        args.checkpoint_csv, args.output_model, args.output_atlas, args.output_spectrum,
+                        *opacity_paths]
             if args.transfer_cache.resolve() in {path.resolve() for path in reserved if path is not None}:
                 raise ValueError("The transfer cache must be separate from input and output files")
             try:
@@ -504,6 +513,8 @@ def main():
                       *document.header[1:])
             document = replace(document, header=header)
             write_document(document, args.output_model)
+        if args.output_atlas:
+            write_atlas(model, result, boundary, args.vmic, args.output_atlas, status=status)
         return 2 if shallow or (args.require_flux_convergence and maximum > args.flux_tolerance) else 0
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))

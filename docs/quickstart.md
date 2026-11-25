@@ -285,6 +285,16 @@ The continuum-only example starts from an analytic gray temperature profile and 
 
 The MARCS-format export contains native thermochemical partial pressures, Rosseland and 5000 Å optical depth, convection, and the calculated gas structure. By default the radius is anchored at the fixed mass coordinate selected from the seed. Use `--photospheric-anchor` to update the reference radius coordinate to the computed Rosseland photosphere. The export uses an isotropic LTE estimate for radiation pressure and zero turbulent pressure. The H₂⁺ column uses the absent-species sentinel, and the Other column sums the unlisted supported molecules. Files with large residuals are labeled unconverged.
 
+Use `--output-atlas trial.dat` to export the same solution as an ATLAS9 `READ DECK6` atmosphere. Use a `.gz` suffix for gzip compression. You can request both formats in one run.
+
+```sh
+giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+  --teff 3500 --logg 1 --mass 1 --steps 1 \
+  --output-model trial.mod --output-atlas trial.dat.gz > trial.csv
+```
+
+The ATLAS export includes the input abundance mixture and all native depth points. The title identifies the spherical solution and its luminosity convergence status. The deck stores column mass and omits shell radii. Consumers that require a plane-parallel atmosphere or exactly 72 layers need to account for those assumptions. The `PRADK` field estimates surface radiation pressure from the emergent radiative flux assuming isotropic intensity over the outgoing hemisphere. [Published ATLAS9 grid files](https://wwwuser.oats.inaf.it/fiorella.castelli/grids/gridp00k2odfnew/ap00k2tab.html)
+
 Use the reference atmosphere runs above to benchmark differences from MARCS. The experimental solver uses a limited species and opacity set and a prescribed radial column-mass grid. Inspect sensitivity to the chosen outer pressure, bottom mass, and transfer grids before using the result quantitatively.
 
 
