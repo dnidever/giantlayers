@@ -13,7 +13,9 @@ from lte_chemistry import Thermochemistry
 from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
-from spherical_heating import evaluate, evaluate_parallel
+from spherical_heating import evaluate, evaluate_parallel, surface_equilibrium_temperature
+from native_transfer import spectral_quadrature
+from odf_transfer import planck_nu
 from spherical_hydrostatic import reconstruct_for_transfer
 
 
@@ -31,14 +33,27 @@ class NativeAtmosphereChecks(unittest.TestCase):
         seed, boundary = initialize(3500, 1, 1, {"H": 12, "He": 10.93}, layers=7)
         model, _ = reconstruct_for_transfer(seed, boundary=boundary)
         wavelength = (1000., 3500., 7000., 15000., 40000., 120000.)
+        serial_samples, parallel_samples = [], []
         serial = evaluate(model, wavelength, (), {}, core_rays=4, chemistry=boundary.chemistry,
-                          native_convection=True)
-        parallel = evaluate_parallel(model, wavelength, (), {}, (), 4, 2, boundary.chemistry, None, 2)
+                          native_convection=True, surface_mean_sample=lambda *x: serial_samples.append(x))
+        parallel = evaluate_parallel(model, wavelength, (), {}, (), 4, 2, boundary.chemistry, None, 2,
+                                     surface_mean_sample=lambda *x: parallel_samples.append(x))
+        self.assertEqual(serial_samples, parallel_samples)
         for i in (0, 1, 6, 8, 9):
             for a, b in zip(serial[i], parallel[i]):
                 self.assertTrue(math.isclose(a, b, rel_tol=1e-10, abs_tol=1e-12))
         for a, b in zip(serial[7], parallel[7]):
             self.assertTrue(math.isclose(a[4], b[4], rel_tol=1e-10))
+
+    def test_surface_balance_recovers_blackbody_radiation_temperature(self):
+        seed, boundary = initialize(3500, 1, 1, {"H": 12, "He": 10.93}, layers=7)
+        model, _ = reconstruct_for_transfer(seed, boundary=boundary)
+        wavelengths = (1000., 3500., 7000., 15000., 40000., 120000.)
+        frequencies, _ = spectral_quadrature(wavelengths, "wavelength")
+        field = tuple(planck_nu(nu, 2400) for nu in frequencies)
+        temperature = surface_equilibrium_temperature(model, wavelengths, field, (), (), 2,
+                                                      boundary.chemistry)
+        self.assertAlmostEqual(temperature, 2400, delta=.01)
 
     def test_cold_dense_chemistry_preserves_pressure_and_charge(self):
         chemistry = Thermochemistry()

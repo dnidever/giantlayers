@@ -184,7 +184,7 @@ def shell_energy_budget(radii, density, flux, pointwise_heating):
 
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
              include_scattering=True, chemistry=None, kernel_path=None, native_convection=False,
-             hydrostatic_force=(), surface_sample=None, line_scale=1.0):
+             hydrostatic_force=(), surface_sample=None, line_scale=1.0, surface_mean_sample=None):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
@@ -224,15 +224,17 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
                     rosseland_inverse[i] += weighted / (absorb + scatter)
                     emission[i] += weight * 4 * math.pi * absorb * source
             try:
-                _, f, q, iterations = solver(rays, widths, density, thermal, absorption, scattering)
+                mean, f, q, iterations = solver(rays, widths, density, thermal, absorption, scattering)
             except ScatteringIterationLimit:
-                _, f, q, _ = solve_wavelength(rays, widths, density, thermal, absorption,
-                                              scattering, max_iterations=0)
+                mean, f, q, _ = solve_wavelength(rays, widths, density, thermal, absorption,
+                                                 scattering, max_iterations=0)
                 iterations = 200
             except RuntimeError as exc:
                 raise RuntimeError(f"At {nu:.8g} Hz, {exc}") from exc
             if surface_sample is not None:
                 surface_sample(wavelength, nu, weight, f[0]*(radii[0]/reference_radius)**2)
+            if surface_mean_sample is not None:
+                surface_mean_sample(wavelength, nu, weight, mean[0])
             max_iterations = max(max_iterations, iterations)
             for i, (local_flux, local_heating) in enumerate(zip(f, q)):
                 flux[i] += weight * local_flux
@@ -250,8 +252,15 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     return result
 
 
+def evaluate_band(arguments, collect_surface_mean):
+    means = []
+    callback = (lambda wave, nu, weight, mean: means.append(mean)) if collect_surface_mean else None
+    return evaluate(*arguments, surface_mean_sample=callback), means
+
+
 def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmic,
-                      chemistry, kernel_path, workers, hydrostatic_force=(), line_scale=1.0):
+                      chemistry, kernel_path, workers, hydrostatic_force=(), line_scale=1.0,
+                      surface_mean_sample=None):
     """Integrate a fixed native atmosphere over overlapping wavelength bands."""
     if len(wavelengths) < 2 or workers < 2:
         raise ValueError("Parallel transfer requires two or more wavelengths and workers")
@@ -259,12 +268,18 @@ def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmi
     indices = [(len(wavelengths)-1)*i//count for i in range(count+1)]
     with ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn")) as executor:
         futures = [
-            executor.submit(evaluate, model, wavelengths[a:b+1], lines, mixture, tables,
-                            core_rays, vmic, True, chemistry, kernel_path, True,
-                            hydrostatic_force, None, line_scale)
+            executor.submit(evaluate_band,
+                            (model, wavelengths[a:b+1], lines, mixture, tables, core_rays, vmic,
+                             True, chemistry, kernel_path, True, hydrostatic_force, None, line_scale),
+                            surface_mean_sample is not None)
             for a, b in zip(indices, indices[1:])
         ]
-        parts = [future.result() for future in futures]
+        parts, band_means = zip(*(future.result() for future in futures))
+    if surface_mean_sample is not None:
+        means = [mean for i, band in enumerate(band_means) for mean in (band[1:] if i else band)]
+        frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
+        for sample in zip(wavelengths, frequencies, weights, means):
+            surface_mean_sample(*sample)
     # The shared endpoints carry half-weights for the two neighboring
     # intervals. Their sum yields the original wavelength quadrature.
     flux = [math.fsum(values) for values in zip(*(part[0] for part in parts))]
@@ -284,6 +299,47 @@ def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmi
     return (flux, heating, luminosity, shells, max(part[4] for part in parts), mismatch,
             tuple(row[11] for row in convection), convection, normalized, acceleration,
             (numerator, denominator, emission, density))
+
+
+def surface_equilibrium_temperature(model, wavelengths, field, lines, tables, vmic, chemistry):
+    """Find a surface temperature in radiative equilibrium at fixed mean intensity."""
+    if len(field) != len(wavelengths):
+        raise ValueError("Provide one surface intensity sample per wavelength")
+    row = model.structure[0]
+    current = row[3]
+    lower = max([chemistry.temperatures[0], *(t.temperatures[0] for t in tables)])
+    upper = min([chemistry.temperatures[-1], *(t.temperatures[-1] for t in tables)])
+    if not lower <= current <= upper:
+        return None
+    frequencies, weights = spectral_quadrature(wavelengths, "wavelength")
+    grids = [(table, table.on_grid(wavelengths)) for table in tables]
+
+    def relative_heating(temperature):
+        surface = replace(model, structure=((*row[:3], temperature, *row[4:]),))
+        layer = next(prepare_layers(surface, lines, {}, vmic, chemistry))
+        absorbed = emitted = 0.0
+        for (line, continuum, _), nu, weight, mean in zip(
+            layer_opacities(layer, wavelengths, grids), frequencies, weights, field
+        ):
+            opacity = weight*(line+continuum)
+            absorbed += opacity*mean
+            emitted += opacity*planck_nu(nu, temperature)
+        return absorbed/emitted-1 if emitted else 0.0
+
+    initial = relative_heating(current)
+    if abs(initial) < 1e-4:
+        return current
+    edge = lower if initial < 0 else upper
+    if initial*relative_heating(edge) > 0:
+        return None
+    a, b = current, edge
+    while abs(a-b) > 0.01:
+        trial = (a+b)/2
+        if relative_heating(trial)*initial > 0:
+            a = trial
+        else:
+            b = trial
+    return (a+b)/2
 
 
 def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
@@ -459,6 +515,22 @@ def merit_descent(columns, residual, layer_count, peak_weight):
     return [-0.01*x/scale for x in gradient] if scale else gradient
 
 
+def calibrate_heating(sampled, full):
+    """Match the full-grid absorbed-to-emitted power ratio at the starting state."""
+    scales, offsets = [], []
+    for a, b in zip(sampled, full):
+        # Each residual is absorbed/emitted minus one. Scale that ratio
+        # so it stays sensitive to changes in local thermal emission.
+        if 1+a > 1e-8 and 1+b > 0:
+            scale = (1+b)/(1+a)
+            offset = scale-1
+        else:
+            scale, offset = 1.0, b-a
+        scales.append(scale)
+        offsets.append(offset)
+    return tuple(scales), tuple(offsets)
+
+
 def update_columns(columns, step, previous, current):
     """Update the finite-difference Jacobian to satisfy the accepted secant."""
     square = math.fsum(x*x for x in step)
@@ -516,7 +588,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
-                       jacobian_workers=1, flux_offset=(), heating_offset=()):
+                       jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=()):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -546,6 +618,11 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     heating_offset = tuple(heating_offset) or (0.0,)*len(baseline)
     if len(heating_offset) != len(baseline) or not all(map(math.isfinite, heating_offset)):
         raise ValueError("The heating offset must contain a finite value at every layer")
+    heating_scale = tuple(heating_scale) or (1.0,)*len(baseline)
+    if len(heating_scale) != len(baseline) or any(
+        not math.isfinite(value) or value <= 0 for value in heating_scale
+    ):
+        raise ValueError("The heating scale must contain a finite positive value at every layer")
     axis = tuple(row[0] for row in baseline)
     if any(a >= b for a, b in zip(axis, axis[1:])):
         raise ValueError("Reference log Rosseland depth must increase inward")
@@ -568,8 +645,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     def objective(evaluation, errors):
         if not heating_weights:
             return errors
-        return [*errors, *(w*(q+offset) for w, q, offset in
-                           zip(heating_weights, evaluation[8], heating_offset))]
+        return [*errors, *(w*(scale*q+offset) for w, q, scale, offset in
+                           zip(heating_weights, evaluation[8], heating_scale, heating_offset))]
 
     def merit(errors):
         return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + peak_weight*max(map(abs, errors))

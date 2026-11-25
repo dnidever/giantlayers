@@ -19,8 +19,9 @@ from marcs_writer import MarcsDocument, write_document
 from molecular_cross_section import MolecularCrossSection
 from native_marcs import build_document, photospheric_anchor, rosseland_depth
 from native_transfer import read_wavelengths
-from spherical_heating import (balance_all_layers, evaluate, evaluate_parallel, report_balance_step,
-                               total_flux_budget, write_balance_csv)
+from spherical_heating import (balance_all_layers, calibrate_heating, evaluate, evaluate_parallel,
+                               report_balance_step, surface_equilibrium_temperature, total_flux_budget,
+                               write_balance_csv)
 from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_for_transfer
 
 
@@ -214,6 +215,8 @@ def main():
                         help="Check the final profile at all input wavelengths")
     parser.add_argument("--full-grid-correction", action="store_true",
                         help="Calibrate the final sampled-grid fit with a full-grid transfer")
+    parser.add_argument("--equilibrate-surface", type=int, nargs="?", const=1, default=0, metavar="PASSES",
+                        help="Refine the outermost temperature with the full-grid radiation field")
     parser.add_argument("--photospheric-anchor", action="store_true",
                         help="Set the reference gravity at the computed Rosseland photosphere")
     parser.add_argument("--radiative-force", action="store_true",
@@ -222,6 +225,8 @@ def main():
     try:
         if args.workers < 1 or not 0 < args.flux_tolerance < 1:
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
+        if args.equilibrate_surface < 0:
+            raise ValueError("Use a nonnegative number of surface correction passes")
         minimum_tau = args.min_bottom_rosseland_tau
         if minimum_tau is not None and (not math.isfinite(minimum_tau) or minimum_tau <= 0):
             raise ValueError("Minimum bottom Rosseland depth must be positive and finite")
@@ -259,25 +264,29 @@ def main():
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
 
-        def transfer_on_grid(surface_sample=None, line_scale=1.0, grid=None):
+        def transfer_on_grid(surface_sample=None, line_scale=1.0, grid=None, surface_mean_sample=None):
             grid = wavelengths if grid is None else grid
             if args.workers > 1 and surface_sample is None:
                 return evaluate_parallel(model, grid, lines, {}, tables, args.core_rays,
                                          args.vmic, boundary.chemistry, args.kernel, args.workers,
-                                         boundary.radiative_acceleration, line_scale)
+                                         boundary.radiative_acceleration, line_scale, surface_mean_sample)
             return evaluate(model, grid, lines, {}, tables, args.core_rays,
                             args.vmic, chemistry=boundary.chemistry,
                             kernel_path=args.kernel, native_convection=True,
                             hydrostatic_force=boundary.radiative_acceleration,
-                            surface_sample=surface_sample, line_scale=line_scale)
+                            surface_sample=surface_sample, line_scale=line_scale,
+                            surface_mean_sample=surface_mean_sample)
 
         update_structure = args.photospheric_anchor or args.radiative_force
         for index, (stride, line_scale) in enumerate(stages, 1):
             wavelengths = nested_wavelengths(reference, stride)
+            if args.steps == 0 and args.equilibrate_surface and not update_structure:
+                model, _ = reconstruct_for_transfer(model, boundary=boundary)
+                break
             print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride}, "
                   f"line opacity {line_scale:.0%})",
                   file=sys.stderr, flush=True)
-            flux_offset = heating_offset = ()
+            flux_offset = heating_offset = heating_scale = ()
             if args.full_grid_correction and index == len(stages) and args.steps > 0 and wavelengths != reference:
                 print(f"Calibrating the residuals on {len(reference):,} wavelengths",
                       file=sys.stderr, flush=True)
@@ -288,8 +297,10 @@ def main():
                 exact = total_flux_budget(model, exact_transfer, True)
                 flux_offset = tuple(b[-1]-a[-1] for a, b in zip(sampled, exact))
                 if args.outer_heating_weight:
-                    heating_offset = tuple(b-a for a, b in zip(sampled_transfer[8], exact_transfer[8]))
-                print("Iteration errors use the calibrated luminosity target",
+                    heating_scale, heating_offset = calibrate_heating(sampled_transfer[8], exact_transfer[8])
+                    print(f"Full-grid starting surface net heating / LTE emission "
+                          f"{exact_transfer[8][0]:+.3%}", file=sys.stderr, flush=True)
+                print("Iteration errors use the calibrated full-grid residuals",
                       file=sys.stderr, flush=True)
             if args.steps == 0 and args.workers > 1:
                 model, _ = reconstruct_for_transfer(model, boundary=boundary)
@@ -307,12 +318,13 @@ def main():
                     on_accept=checkpoint if args.checkpoint_csv else None,
                     adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
                     line_scale=line_scale, jacobian_workers=args.workers,
-                    flux_offset=flux_offset, heating_offset=heating_offset,
+                    flux_offset=flux_offset, heating_offset=heating_offset, heating_scale=heating_scale,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
                                               args.radiative_force)
-        if (args.verify_full or args.full_grid_correction) and wavelengths != reference:
+        if ((args.verify_full or args.full_grid_correction) and wavelengths != reference
+                and (not args.equilibrate_surface or update_structure)):
             print(f"Verifying on {len(reference):,} wavelengths", file=sys.stderr, flush=True)
             wavelengths = reference
 
@@ -330,6 +342,36 @@ def main():
                                          args.radiative_force)
             print(f"Boundary updates {'settled' if settled else 'reached the iteration limit'}",
                   file=sys.stderr)
+        if args.equilibrate_surface:
+            wavelengths = reference
+            field = []
+            print(f"Solving the outermost thermal balance on {len(reference):,} wavelengths",
+                  file=sys.stderr, flush=True)
+            result = transfer_on_grid(surface_mean_sample=lambda wave, nu, weight, mean: field.append(mean))
+            for _ in range(args.equilibrate_surface):
+                temperature = surface_equilibrium_temperature(model, wavelengths, field, lines, tables,
+                                                              args.vmic, boundary.chemistry)
+                if temperature is None:
+                    print("Surface balance was not bracketed within the opacity temperature range", file=sys.stderr)
+                    break
+                if temperature == model.structure[0][3]:
+                    break
+                original = model
+                top = model.structure[0]
+                profile = replace(model, structure=((*top[:3], temperature, *top[4:]), *model.structure[1:]))
+                model, _ = reconstruct_for_transfer(profile, boundary=boundary)
+                field = []
+                trial = transfer_on_grid(surface_mean_sample=lambda wave, nu, weight, mean: field.append(mean))
+                old_max = max(abs(row[-1]) for row in total_flux_budget(original, result, True))
+                new_max = max(abs(row[-1]) for row in total_flux_budget(model, trial, True))
+                if abs(trial[8][0]) < abs(result[8][0]) and new_max <= max(args.flux_tolerance, old_max):
+                    print(f"Accepted surface temperature {temperature:.2f} K "
+                          f"(net heating {result[8][0]:+.3%} to {trial[8][0]:+.3%})", file=sys.stderr)
+                    result = trial
+                else:
+                    print("Surface trial failed full-grid heating or luminosity acceptance", file=sys.stderr)
+                    model = original
+                    break
         if args.photospheric_anchor:
             measured = photospheric_anchor(model, boundary, result)
             print(f"Rosseland photosphere reference index {boundary.anchor+1:.4f}, "
@@ -352,6 +394,7 @@ def main():
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
               f"(maximum error {maximum:.3%})", file=sys.stderr)
+        print(f"Surface net heating / LTE emission {result[8][0]:+.3%}", file=sys.stderr)
         bottom_tau = rosseland_depth(model, boundary, result)[-1]
         print(f"Bottom Rosseland optical depth {bottom_tau:.6g}", file=sys.stderr)
         shallow = minimum_tau is not None and bottom_tau < minimum_tau

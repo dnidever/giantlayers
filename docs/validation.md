@@ -66,3 +66,21 @@ Recalibrating the second starting profile gave a full-grid maximum residual of 1
 Giving the outer-heating objective weight 0.25 in the full-grid-calibrated 56-layer fit reduced the measured maximum luminosity error from 0.896% to 0.367% and the outermost cooling fraction from 31.7% to 20.4%. The final bottom Rosseland depth was 106.4. Over the 30 layers with log Rosseland depth at or below log₁₀(0.03), the RMS net-heating fraction fell from 5.98% to 3.87%. One cold surface layer and 17 hot layers used molecular table boundary values. On the 51 MARCS depths covered by both exports, their temperature RMS differences were 104 K before and 120 K after the heating correction.
 
 A second heating calibration at stride 40 (2,520 samples) and outer heating weight 0.35 gave 0.164% RMS and 0.608% maximum luminosity error on all 100,724 wavelengths. The final bottom Rosseland depth was 106.6. The outermost cooling fraction was 18.5% and the RMS net-heating fraction over the 30 layers at Rosseland depth at or below 0.03 was 3.47%. These full-grid measurements show that the flux-converged solution retains a local thermal imbalance. The original MARCS Fortran reader opened the resulting .mod file.
+
+## Cool-surface opacity and heating
+
+The cool-surface tests extend the same TiO, H₂O, VO, and CO ExoMolOP tables with the published 1,800, 1,900, and 2,000 K slices. The previous 2,200–3,400 K rows, 10–10,000 dyn/cm² pressure points, and native wavelengths are preserved. A local copy of each original TauREx HDF5 file can be converted with:
+
+```sh
+python3 -m exomol_import input.h5 output.json.gz --species TiO --isotope-fraction 0.7372 \
+  --temperature-points 1800 1900 2000 2200 2400 2600 2800 3000 3200 3400 \
+  --pressure-points 10 100 1000 10000
+```
+
+Use the appropriate species and isotopic fraction for each table. Explicit points match tabulated values, and unavailable choices are errors.
+
+The heating fit calibrates the absorbed-to-emitted power ratio at the starting profile. If the sampled and full-grid normalized heating values are q_s and q_f, the calibration multiplies 1 + q_s by (1 + q_f)/(1 + q_s) evaluated at that profile. The multiplier stays fixed during the sampled fit. The final full-grid transfer reports the actual surface heating fraction and luminosity residuals.
+
+The denser 5,038-point fit with the original opacity tables had a maximum full-grid luminosity error of 0.730% and a surface cooling fraction of 14.4%. At the same starting temperatures, adding the colder opacity data changed the measured surface cooling from 18.5% to 19.2%. After fitting with the colder data and the absorbed-to-emitted ratio calibration, the full-grid maximum luminosity error was 0.926% and the surface cooling fraction was 9.17%. The surface temperature was within the tabulated range and the hot layers still used the upper table edge.
+
+Use `--equilibrate-surface` for one additional correction to the outermost temperature, or pass a number to repeat it. GiantLayers measures the full-grid mean intensity, solves local thermal balance while holding that radiation field and surface gas pressure fixed, then reconstructs and evaluates the atmosphere on the complete wavelength grid. It accepts the correction when the measured local imbalance decreases and the maximum luminosity error stays within tolerance or improves from an already unconverged profile. Other layer temperatures and hydrostatic boundary parameters stay fixed during this step. A first application took the fiducial surface from 1,875 K to 1,850 K, reducing measured cooling to 5.36% and maximum luminosity error to 0.886%.

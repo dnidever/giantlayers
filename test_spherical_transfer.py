@@ -12,13 +12,22 @@ from unittest.mock import patch
 
 from lte_opacity import C_ANGSTROM_S, LineProfiles, line_opacity, sample_line_opacity
 from marcs_writer import MarcsDocument
-from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, correct_temperatures,
+from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, calibrate_heating, correct_temperatures,
                                merit_descent, shell_energy_budget, solve_wavelength, temperature_direction)
 from spherical_kernel_loader import CompiledKernel
 from spherical_transfer import disk_rays, surface_fluxes
 
 
 class TransferChecks(unittest.TestCase):
+    def test_heating_calibration_preserves_absorbed_to_emitted_power(self):
+        sampled = (-.2, .1, -1.)
+        full = (-.4, .3, -.95)
+        scales, offsets = calibrate_heating(sampled, full)
+        for a, b, scale, offset in zip(sampled, full, scales, offsets):
+            self.assertAlmostEqual(scale*a+offset, b)
+        self.assertAlmostEqual(scales[0], .75)
+        self.assertEqual(scales[-1], 1.)
+
     def test_large_temperature_correction_reaches_step_limit(self):
         self.assertAlmostEqual(temperature_direction([[1.0]], [0.4])[0], -0.03)
         strong, weak = temperature_direction([[10.0, 0.0], [0.0, 0.001]], [-0.2, 0.2])
