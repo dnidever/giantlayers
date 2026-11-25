@@ -257,3 +257,16 @@ python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json 
 ```
 
 The outer temperature variables target adjacent-shell luminosity balance. The photospheric mode targets absolute surface luminosity, and `--adjust-deep` varies the deepest temperatures individually to target total luminosity at those layers. The solver reports these errors separately. This trial adjusts selected depths and retains the original radial mass grid and outer pressure.
+
+
+### Fit the total luminosity at every layer
+
+Use `--global-balance` to solve for the temperature profile with native spherical transfer, hydrostatic balance, and Henyey mixing-length convection. The target is the same total luminosity at every radius. Each trial recomputes the gas structure, chemistry, wavelength-dependent opacities, and radiative and convective fluxes on the input model's radial mass grid. The input mass, gravity, and surface gas pressure set the boundaries.
+
+GiantLayers identifies the contiguous region extending inward to the model's deepest layer where convection carries at least 0.01% of the target luminosity. Each layer in that region gets its own temperature variable. Above it, fractional temperature corrections are interpolated in the input model's log Rosseland depth between five control points by default. Change that number with `--upper-knots`. The solver evaluates the total luminosity error at every layer and accepts a step when the RMS error falls and the maximum absolute error does not increase.
+
+```sh
+python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --global-balance --stride 400 --core-rays 24 --steps 1 --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > global-luminosity.csv
+```
+
+The CSV contains the corrected structure and the relative total-flux error at every layer. Increase `--steps` to attempt additional corrections. For a wavelength-resolution check, add `--verify-full` to reevaluate the resulting profile across the full input wavelength grid.
