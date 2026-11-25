@@ -316,6 +316,116 @@ def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
     return current, result, history
 
 
+def global_temperature_knots(convective_fractions, upper_knots=5):
+    """Resolve each layer of the deep energy-carrying convection zone."""
+    count = len(convective_fractions)
+    start = count
+    while start and convective_fractions[start-1] >= 1e-4:
+        start -= 1
+    if start == 0:
+        return tuple(range(count)), start
+    upper_count = min(start, upper_knots)
+    if upper_count == 1:
+        upper = [0]
+    else:
+        upper = [round(i*(start-1)/(upper_count-1)) for i in range(upper_count)]
+    return (*upper, *range(start, count)), start
+
+
+def interpolate_corrections(axis, knots, values):
+    correction = [0.0] * len(axis)
+    for lo, hi, a, b in zip(knots, knots[1:], values, values[1:]):
+        for i in range(lo, hi):
+            fraction = (axis[i]-axis[lo])/(axis[hi]-axis[lo])
+            correction[i] = a + fraction*(b-a)
+    correction[knots[-1]] = values[-1]
+    return correction
+
+
+def balance_all_layers(model, wavelengths, lines, composition, steps=1,
+                       tables=(), core_rays=12, vmic=2.0, include_scattering=True,
+                       kernel_path=None, upper_knots=5):
+    """Fit absolute total luminosity across the entire hydrostatic structure."""
+    if steps < 1 or upper_knots < 2:
+        raise ValueError("Use at least one iteration and two upper temperature knots")
+    chemistry = Thermochemistry()
+    boundary, _ = boundary_from_marcs(model, chemistry, composition)
+    radius = boundary.reference_radius
+    luminosity_target = 4 * math.pi * radius**2 * float(model.header[2].split()[0])
+    baseline = model.structure
+    axis = tuple(row[0] for row in baseline)
+    if any(a >= b for a, b in zip(axis, axis[1:])):
+        raise ValueError("Reference log Rosseland depth must increase inward")
+
+    def evaluate_trial(profile):
+        current, _ = reconstruct_for_transfer(profile, boundary=boundary)
+        result = evaluate(current, wavelengths, lines, composition, tables, core_rays,
+                          vmic, include_scattering, chemistry, kernel_path, True)
+        convection = [
+            4 * math.pi * (radius-row[2])**2 * flux / luminosity_target
+            for row, flux in zip(current.structure, result[6])
+        ]
+        residual = [r/luminosity_target + c - 1 for r, c in zip(result[2], convection)]
+        return current, result, residual, convection
+
+    def metrics(residual):
+        return (math.sqrt(math.fsum(x*x for x in residual)/len(residual)),
+                max(map(abs, residual)), residual[0], residual[-1])
+
+    current, result, residual, convection = evaluate_trial(model)
+    knots, convective_start = global_temperature_knots(convection, upper_knots)
+    parameters = [0.0] * len(knots)
+    history = [metrics(residual)]
+
+    def trial(values):
+        correction = interpolate_corrections(axis, knots, values)
+        structure = tuple(
+            (*row[:3], row[3]*(1+x), *row[4:]) for row, x in zip(baseline, correction)
+        )
+        if any(not chemistry.temperatures[0] <= row[3] <= chemistry.temperatures[-1]
+               for row in structure):
+            return None
+        return evaluate_trial(replace(model, structure=structure))
+
+    for _ in range(steps):
+        if history[-1][1] < 1e-8:
+            break
+        columns = []
+        for i in range(len(knots)):
+            perturb = parameters.copy()
+            perturb[i] += 0.001
+            shifted = trial(perturb)
+            if shifted is None:
+                perturb[i] -= 0.002
+                shifted = trial(perturb)
+            if shifted is None:
+                raise RuntimeError("Cannot perturb a temperature knot within the LTE table")
+            delta = perturb[i] - parameters[i]
+            columns.append([(b-a)/delta for a, b in zip(residual, shifted[2])])
+        normal = [[math.fsum(a*b for a, b in zip(x, y)) for y in columns] for x in columns]
+        rhs = [-math.fsum(a*b for a, b in zip(column, residual)) for column in columns]
+        damping = 1e-8 * max(normal[i][i] for i in range(len(columns)))
+        for i in range(len(columns)):
+            normal[i][i] += damping
+        direction = _linear_solve(normal, rhs)
+        largest = max(map(abs, direction))
+        scale = min(1.0, 0.03/largest) if largest else 1.0
+        for _ in range(8):
+            candidate = [p + scale*d for p, d in zip(parameters, direction)]
+            proposed = trial(candidate)
+            if proposed is not None:
+                next_metrics = metrics(proposed[2])
+                if next_metrics[0] < history[-1][0] and next_metrics[1] <= history[-1][1]:
+                    current, result, residual, _ = proposed
+                    parameters = candidate
+                    history.append(next_metrics)
+                    break
+            scale *= 0.5
+        else:
+            break
+    return current, result, history, knots, convective_start
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model")
@@ -341,13 +451,23 @@ def main():
                         help="Compute convection from native Rosseland opacity and LTE thermodynamics")
     parser.add_argument("--adjust-deep", type=int, default=0,
                         help="Also fit the absolute flux at this many bottom layers")
+    parser.add_argument("--global-balance", action="store_true",
+                        help="Fit total luminosity at every layer with native convection and hydrostatic balance")
+    parser.add_argument("--upper-knots", type=int, default=5,
+                        help="Number of temperature control points above the deep convective region")
     args = parser.parse_args()
     if not math.isfinite(args.vmic) or args.vmic < 0 or args.adjust_layers < 0 or args.steps < 1:
         parser.error("Use nonnegative microturbulence and layer count, and at least one step")
-    if (args.luminosity_target or args.verify_full) and not args.adjust_layers:
-        parser.error("--luminosity-target and --verify-full require --adjust-layers")
+    if args.luminosity_target and not (args.adjust_layers or args.global_balance):
+        parser.error("--luminosity-target requires --adjust-layers or --global-balance")
+    if args.verify_full and not (args.adjust_layers or args.global_balance):
+        parser.error("--verify-full requires --adjust-layers or --global-balance")
     if args.adjust_deep and (not args.native_convection or not args.adjust_layers):
         parser.error("--adjust-deep requires --native-convection and --adjust-layers")
+    if args.global_balance and (args.adjust_layers or args.adjust_deep):
+        parser.error("--global-balance selects its own temperature controls")
+    if args.global_balance:
+        args.hydrostatic = args.native_convection = True
     try:
         model = read_document(args.model)
         reference = read_wavelengths(args.wavelengths)
@@ -357,11 +477,23 @@ def main():
             composition = json.load(stream)
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
         initial = model
-        if args.hydrostatic and not args.adjust_layers:
+        if args.hydrostatic and not (args.adjust_layers or args.global_balance):
             model, solution = reconstruct_for_transfer(model, mixture=composition)
             print(f"Hydrostatic iterations: {solution.iterations}; "
                   f"relative cell pressure residual: {solution.pressure_residual:.3e}", file=sys.stderr)
-        if args.adjust_layers:
+        if args.global_balance:
+            model, result, history, knots, start = balance_all_layers(
+                model, wavelengths, lines, composition, args.steps, tables, args.core_rays,
+                args.vmic, not args.absorption_only, args.kernel, args.upper_knots,
+            )
+            print(f"Temperature controls: {', '.join(str(i+1) for i in knots)}", file=sys.stderr)
+            if start < len(model.structure):
+                print(f"Deep convective region: layers {start+1}–{len(model.structure)}",
+                      file=sys.stderr)
+            for step, (rms, maximum, surface, bottom) in enumerate(history):
+                print(f"Step {step}: luminosity error RMS {rms:.3%}, maximum {maximum:.3%}, "
+                      f"surface {surface:+.3%}, bottom {bottom:+.3%}", file=sys.stderr)
+        elif args.adjust_layers:
             model, result, history = correct_temperatures(
                 model, wavelengths, lines, composition, args.adjust_layers, args.steps,
                 tables, args.core_rays, args.vmic, include_scattering=not args.absorption_only,
@@ -372,15 +504,15 @@ def main():
                 deep_text = f", max deep luminosity error {deep[0]:.3%}" if deep else ""
                 print(f"Step {step}: max outer-shell luminosity residual {residual:.4e}, "
                       f"surface total-flux error {surface:+.3%}{deep_text}", file=sys.stderr)
-            if args.verify_full and wavelengths != reference:
-                print(f"Verifying the corrected profile on {len(reference):,} wavelengths", file=sys.stderr)
-                result = evaluate(model, reference, lines, composition, tables,
-                                  args.core_rays, args.vmic, include_scattering=not args.absorption_only,
-                                  kernel_path=args.kernel, native_convection=args.native_convection)
         else:
             result = evaluate(model, wavelengths, lines, composition, tables,
                               args.core_rays, args.vmic, include_scattering=not args.absorption_only,
-                                  kernel_path=args.kernel, native_convection=args.native_convection)
+                              kernel_path=args.kernel, native_convection=args.native_convection)
+        if args.verify_full and wavelengths != reference:
+            print(f"Verifying the corrected profile on {len(reference):,} wavelengths", file=sys.stderr)
+            result = evaluate(model, reference, lines, composition, tables,
+                              args.core_rays, args.vmic, include_scattering=not args.absorption_only,
+                              kernel_path=args.kernel, native_convection=args.native_convection)
         flux, heating, luminosity, shells, iterations, mismatch = result[:6]
         budget = list(reference_flux_budget(model, flux))
         convection = result[6] if args.native_convection else [row[0] for row in budget]
