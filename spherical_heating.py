@@ -583,12 +583,21 @@ def run_trial(profile):
     return _worker_transfer(profile)
 
 
+def log_temperature_curvature(axis, structure):
+    """Log-temperature departures from interpolation between adjacent layers."""
+    temperatures = [math.log(row[3]) for row in structure]
+    for i in range(1, len(axis)-1):
+        fraction = (axis[i]-axis[i-1])/(axis[i+1]-axis[i-1])
+        yield temperatures[i] - ((1-fraction)*temperatures[i-1] + fraction*temperatures[i+1])
+
+
 def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
-                       jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=()):
+                       jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=(),
+                       temperature_smoothness=0.0):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -598,6 +607,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         raise ValueError("Jacobian interval must be at least one")
     if not math.isfinite(outer_heating_weight) or outer_heating_weight < 0:
         raise ValueError("Outer heating weight must be finite and nonnegative")
+    if not math.isfinite(temperature_smoothness) or temperature_smoothness < 0:
+        raise ValueError("Temperature smoothness weight must be finite and nonnegative")
     if adaptive_knots < 0 or not math.isfinite(peak_weight) or peak_weight < 0:
         raise ValueError("Adaptive temperature controls and peak error weight must be nonnegative")
     if not math.isfinite(line_scale) or not 0 <= line_scale <= 1:
@@ -642,16 +653,19 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         depths = integrate(increments(boundary.column_mass, rosseland), 0.0)
         heating_weights = [outer_heating_weight*math.exp(-tau/0.03) for tau in depths]
 
-    def objective(evaluation, errors):
-        if not heating_weights:
-            return errors
-        return [*errors, *(w*(scale*q+offset) for w, q, scale, offset in
-                           zip(heating_weights, evaluation[8], heating_scale, heating_offset))]
+    def objective(structure, evaluation, errors):
+        residuals = list(errors)
+        if heating_weights:
+            residuals.extend(w*(scale*q+offset) for w, q, scale, offset in
+                             zip(heating_weights, evaluation[8], heating_scale, heating_offset))
+        if temperature_smoothness:
+            residuals.extend(temperature_smoothness*x for x in log_temperature_curvature(axis, structure))
+        return residuals
 
     def merit(errors):
         return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + peak_weight*max(map(abs, errors))
 
-    residual = objective(result, flux_residual)
+    residual = objective(current.structure, result, flux_residual)
     knots, convective_start = global_temperature_knots(convection, upper_knots)
     parameters = [0.0] * len(knots)
     history = [metrics(flux_residual)]
@@ -690,7 +704,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                 results = list(executor.map(run_trial, profiles))
         columns = []
         for shifted, delta in zip(results, deltas):
-            trial_residual = objective(shifted[1], shifted[2])
+            trial_residual = objective(shifted[0].structure, shifted[1], shifted[2])
             columns.append([(b-a)/delta for a, b in zip(residual, trial_residual)])
         return columns
 
@@ -704,7 +718,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             profile = trial_profile(candidate)
             if profile is not None:
                 proposed = evaluate_trial(profile)
-                proposed_residual = objective(proposed[1], proposed[2])
+                proposed_residual = objective(proposed[0].structure, proposed[1], proposed[2])
                 if merit(proposed_residual) < previous_merit:
                     return candidate, proposed, proposed_residual
             scale *= 0.5

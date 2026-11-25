@@ -13,13 +13,22 @@ from lte_chemistry import Thermochemistry
 from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
-from spherical_heating import evaluate, evaluate_parallel, surface_equilibrium_temperature
+from spherical_heating import (
+    evaluate, evaluate_parallel, log_temperature_curvature, surface_equilibrium_temperature,
+)
 from native_transfer import spectral_quadrature
 from odf_transfer import planck_nu
 from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_temperature_curvature_accounts_for_nonuniform_layer_spacing(self):
+        axis = (0, 0.1, 1)
+        linear = [(0, 0, 0, math.exp(8 + 0.2*x)) for x in axis]
+        self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0)
+        linear[1] = (0, 0, 0, math.exp(8.05))
+        self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0.03)
+
     def test_deep_grid_refines_below_same_reference_column(self):
         _, original = initialize(3500, 1, 1, {"H": 12}, layers=56)
         _, refined = initialize(3500, 1, 1, {"H": 12}, layers=56, deep_layers=18)

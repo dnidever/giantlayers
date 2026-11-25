@@ -98,3 +98,26 @@ For the 56-layer fiducial on 2,520 wavelength samples, omitting all four tables 
 On all 100,724 MARCS wavelengths, the joint omission increased the maximum absolute luminosity residual from 0.851% to 4.167%. The largest shift was 4.374 percentage points in layer 41 at 3,551 K. The control and stress test used identical temperatures and column masses. The surface cooling fraction changed from 1.615% to 1.304% of local LTE emission.
 
 The [published TiO ToTo line list](https://doi.org/10.1093/mnras/stz1818) is designed for temperatures below 5,000 K. It can supply additional TiO cross-section slices beyond the 3,400 K limit of the imported grid.
+
+## Recompute hot molecular opacity
+
+The offline Doppler converter calculates LTE absorption directly from ExoMol states, Einstein A coefficients, and the tabulated partition function. It integrates each thermal and microturbulent Doppler profile over geometric wavenumber bins defined by the wavelength grid of a portable GiantLayers table. The output has the same species, isotope fraction, pressure axis, and wavelengths as the template. It recomputes all temperatures and repeats the same pressure-independent cross sections at each pressure. The generated table records hashes of all three ExoMol inputs.
+
+The converter uses NumPy and a C compiler during table preparation. The atmosphere solver reads the resulting JSON file through `--molecular-cross-section` with its usual dependencies. A matched capped table isolates the effect of temperature coverage from differences between the Doppler calculation and the ExoMolOP reference cross sections.
+
+For example, from a repository checkout with the TiO files and portable ExoMolOP template in the current directory:
+
+```sh
+cc -O3 -o exomol_doppler tools/exomol_doppler.c -lm
+python tools/exomol_doppler.py tio-exomolop.json.gz \
+  48Ti-16O__Toto.states.bz2 48Ti-16O__Toto.trans.bz2 48Ti-16O__Toto.pf \
+  tio-extended.json.gz --kernel ./exomol_doppler --mass-amu 63.943846 \
+  --extend-temperatures 3500 3600 3800 4000 4250 4500 4750 4900 \
+  --capped-control tio-capped.json.gz
+```
+
+The TiO example uses the published [ExoMol ToTo files](https://www.exomol.com/data/molecules/TiO/48Ti-16O/Toto/) and a template ending at 3,400 K. The offline converter omits collisional and natural broadening. Use its tables to test the sensitivity to thermal populations and Doppler widths before adopting them in new atmosphere calculations.
+
+## Temperature smoothness and layer structure
+
+Use `--temperature-smoothness WEIGHT` to add a penalty for short-scale oscillations to a temperature fit. At every interior layer, the solver compares log temperature with a linear interpolation from the neighboring layers in the reference log Rosseland coordinate. It includes these weighted differences in the least-squares objective and in trial-step acceptance. Luminosity convergence is still measured from the unpenalized flux errors. The default weight of zero preserves the original objective. Test sensitivity to the weight and to the layer grid before interpreting a feature in the temperature structure.

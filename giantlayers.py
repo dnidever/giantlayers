@@ -207,6 +207,8 @@ def main():
                         help="Exit with status 2 if the computed bottom Rosseland depth is smaller")
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
+    parser.add_argument("--temperature-smoothness", type=float, default=0.0,
+                        help="Penalize short-scale log-temperature curvature during the fit")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
     parser.add_argument("--output-spectrum", type=Path, help="Write the emergent spectrum on the final grid")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
@@ -225,6 +227,8 @@ def main():
                         help="Include radiative acceleration in the hydrostatic pressure balance")
     args = parser.parse_args()
     try:
+        if not math.isfinite(args.temperature_smoothness) or args.temperature_smoothness < 0:
+            raise ValueError("Temperature smoothness weight must be finite and nonnegative")
         if args.workers < 1 or not 0 < args.flux_tolerance < 1:
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         if args.equilibrate_surface < 0:
@@ -337,6 +341,7 @@ def main():
                     adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
                     line_scale=line_scale, jacobian_workers=args.workers,
                     flux_offset=flux_offset, heating_offset=heating_offset, heating_scale=heating_scale,
+                    temperature_smoothness=args.temperature_smoothness,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,

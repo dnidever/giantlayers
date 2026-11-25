@@ -4,3 +4,4 @@ include spherical_kernel.c
 include test_*.py
 recursive-include docs *.md *.txt
 recursive-include examples *.json *.dat
+include tools/exomol_doppler.c tools/exomol_doppler.py
