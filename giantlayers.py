@@ -1,11 +1,13 @@
 """Compute a spherical LTE atmosphere from stellar parameters and opacity data."""
 
 import argparse
+import csv
 from dataclasses import replace
 import json
 import math
 from pathlib import Path
 import sys
+from tempfile import NamedTemporaryFile
 
 from benchmark_sampling import nested_wavelengths
 from gray_atmosphere import SIGMA
@@ -13,10 +15,10 @@ from lte_chemistry import Thermochemistry
 from lte_opacity import read_lines
 from marcs_writer import MarcsDocument, write_document
 from molecular_cross_section import MolecularCrossSection
-from native_marcs import build_document
+from native_marcs import build_document, photospheric_anchor
 from native_transfer import read_wavelengths
 from spherical_heating import balance_all_layers, evaluate, report_balance_step, write_balance_csv
-from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS
+from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_for_transfer
 
 
 def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
@@ -38,7 +40,10 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
             or not abundances.keys() <= chemistry.atoms.keys()
             or not all(isinstance(x, (float, int)) and math.isfinite(x) for x in abundances.values())):
         raise ValueError("Supply absolute log epsilon values for known elements, including H = 12")
-    gravity = 10.0**logg
+    try:
+        gravity = 10.0**logg
+    except OverflowError as exc:
+        raise ValueError("Surface gravity must be positive and finite") from exc
     if not math.isfinite(gravity) or gravity <= 0:
         raise ValueError("Surface gravity must be positive and finite")
     # Distribute depths in log(1 + m/m_scale) to cover the surface and
@@ -86,6 +91,47 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
     return MarcsDocument(header, tuple(vector), structure, thermo, ()), boundary
 
 
+def restart_temperatures(seed, path):
+    """Resume from CSV temperatures on the same radial column-mass grid."""
+    with path.open(encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"layer", "column_mass_g_cm2", "temperature_K"}
+        if not required <= set(reader.fieldnames or ()):
+            raise ValueError("Restart CSV requires layer, column mass, and temperature columns")
+        rows = list(reader)
+    if len(rows) != len(seed.structure) or any(
+        int(row["layer"]) != index or not math.isclose(float(row["column_mass_g_cm2"]), thermo[-1], rel_tol=1e-9)
+        for index, (row, thermo) in enumerate(zip(rows, seed.thermodynamics), 1)
+    ):
+        raise ValueError("Restart CSV must match the current radial column-mass grid")
+    structure = tuple((*row[:3], float(saved["temperature_K"]), *row[4:])
+                      for row, saved in zip(seed.structure, rows))
+    return replace(seed, structure=structure)
+
+
+def write_checkpoint(path, initial, model, result):
+    """Replace the checkpoint after a complete CSV has been written."""
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", dir=path.parent, encoding="utf-8",
+                                newline="", delete=False) as stream:
+            temporary = Path(stream.name)
+            write_balance_csv(stream, initial, model, result, native_convection=True)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def update_boundary(model, diagnostics, boundary, at_photosphere, radiative_force):
+    anchor = photospheric_anchor(model, boundary, diagnostics) if at_photosphere else boundary.anchor
+    force = diagnostics[9] if radiative_force else ()
+    previous = boundary.radiative_acceleration or (0.0,)*len(force)
+    force_error = max((abs(a-b) for a, b in zip(force, previous)), default=0.0)/boundary.gravity
+    settled = abs(anchor-boundary.anchor) <= 1e-3 and force_error <= 1e-4
+    return replace(boundary, anchor=anchor, radiative_acceleration=force), settled
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wavelengths", type=Path, help="Vacuum wavelength grid in Å")
@@ -102,15 +148,28 @@ def main():
     parser.add_argument("--vmic", type=float, default=2.0, help="Microturbulence in km/s")
     parser.add_argument("--alpha", type=float, default=1.5, help="Mixing length in pressure scale heights")
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--refine-stride", type=int, action="append", default=[],
+                        help="Continue on a finer wavelength stride after the initial stage")
     parser.add_argument("--core-rays", type=int, default=24)
-    parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--steps", type=int, default=1,
+                        help="Temperature corrections per stage (0 to evaluate the initial profile)")
     parser.add_argument("--upper-knots", type=int, default=12)
+    parser.add_argument("--jacobian-interval", type=int, default=3,
+                        help="Steps between finite-difference Jacobian refreshes")
     parser.add_argument("--kernel", type=Path, help="Optional compiled spherical transfer library")
     parser.add_argument("--flux-tolerance", type=float, default=0.01,
                         help="Maximum fractional luminosity error for convergence")
+    parser.add_argument("--outer-heating-weight", type=float, default=0.0,
+                        help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
+    parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
+    parser.add_argument("--checkpoint-csv", type=Path, help="Save a restart CSV after each accepted correction")
     parser.add_argument("--verify-full", action="store_true",
                         help="Check the final profile at all input wavelengths")
+    parser.add_argument("--photospheric-anchor", action="store_true",
+                        help="Set the reference gravity at the computed Rosseland photosphere")
+    parser.add_argument("--radiative-force", action="store_true",
+                        help="Include radiative acceleration in the hydrostatic pressure balance")
     args = parser.parse_args()
     try:
         abundances = json.loads(args.abundances.read_text(encoding="utf-8"))
@@ -120,20 +179,63 @@ def main():
             gray_tau_bottom=args.gray_tau_bottom, vmic=args.vmic, alpha=args.alpha,
         )
         reference = read_wavelengths(args.wavelengths)
-        wavelengths = nested_wavelengths(reference, args.stride)
+        strides = [args.stride, *args.refine_stride]
+        if any(a <= b for a, b in zip(strides, strides[1:])):
+            raise ValueError("Refinement strides must decrease at each stage")
         lines = read_lines(args.lines) if args.lines else ()
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
-        model, result, _, _, _ = balance_all_layers(
-            seed, wavelengths, lines, {}, steps=args.steps, tables=tables,
-            core_rays=args.core_rays, vmic=args.vmic, kernel_path=args.kernel,
-            upper_knots=args.upper_knots, boundary=boundary, progress=report_balance_step,
-            flux_tolerance=args.flux_tolerance,
-        )
+        model = seed = restart_temperatures(seed, args.restart_csv) if args.restart_csv else seed
+
+        def checkpoint(current, diagnostics):
+            write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
+
+        def transfer_on_grid():
+            return evaluate(model, wavelengths, lines, {}, tables, args.core_rays,
+                            args.vmic, chemistry=boundary.chemistry,
+                            kernel_path=args.kernel, native_convection=True,
+                            hydrostatic_force=boundary.radiative_acceleration)
+
+        update_structure = args.photospheric_anchor or args.radiative_force
+        for stride in strides:
+            wavelengths = nested_wavelengths(reference, stride)
+            print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride})",
+                  file=sys.stderr, flush=True)
+            model, result, _, _, _ = balance_all_layers(
+                model, wavelengths, lines, {}, steps=args.steps, tables=tables,
+                core_rays=args.core_rays, vmic=args.vmic, kernel_path=args.kernel,
+                upper_knots=args.upper_knots, boundary=boundary, progress=report_balance_step,
+                flux_tolerance=args.flux_tolerance, jacobian_interval=args.jacobian_interval,
+                outer_heating_weight=args.outer_heating_weight,
+                on_accept=checkpoint if args.checkpoint_csv else None,
+            )
+            if update_structure and stride != strides[-1]:
+                boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
+                                              args.radiative_force)
         if args.verify_full and wavelengths != reference:
             print(f"Verifying on {len(reference):,} wavelengths", file=sys.stderr, flush=True)
-            result = evaluate(model, reference, lines, {}, tables, args.core_rays,
-                              args.vmic, chemistry=boundary.chemistry,
-                              kernel_path=args.kernel, native_convection=True)
+            wavelengths = reference
+
+            result = transfer_on_grid()
+        if update_structure:
+            for _ in range(4):
+                updated, settled = update_boundary(model, result, boundary, args.photospheric_anchor,
+                                                   args.radiative_force)
+                if settled:
+                    break
+                boundary = updated
+                model, _ = reconstruct_for_transfer(model, boundary=boundary)
+                result = transfer_on_grid()
+            _, settled = update_boundary(model, result, boundary, args.photospheric_anchor,
+                                         args.radiative_force)
+            print(f"Boundary updates {'settled' if settled else 'reached the iteration limit'}",
+                  file=sys.stderr)
+        if args.photospheric_anchor:
+            measured = photospheric_anchor(model, boundary, result)
+            print(f"Rosseland photosphere reference index {boundary.anchor+1:.4f}, "
+                  f"measured {measured+1:.4f}", file=sys.stderr)
+        if args.radiative_force:
+            print(f"Peak radiative acceleration / reference gravity {max(result[9])/boundary.gravity:.3%}",
+                  file=sys.stderr)
         budget = write_balance_csv(sys.stdout, seed, model, result, native_convection=True)
         maximum = max(abs(row[-1]) for row in budget)
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"

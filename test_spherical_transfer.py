@@ -9,11 +9,25 @@ from unittest.mock import patch
 from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
 from marcs_writer import MarcsDocument
 from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, correct_temperatures,
-                               shell_energy_budget, solve_wavelength)
+                               shell_energy_budget, solve_wavelength, temperature_direction)
 from spherical_transfer import disk_rays, surface_fluxes
 
 
 class TransferChecks(unittest.TestCase):
+    def test_large_temperature_correction_reaches_step_limit(self):
+        self.assertAlmostEqual(temperature_direction([[1.0]], [0.4])[0], -0.03)
+
+    def test_direct_scattering_matches_converged_iteration(self):
+        rays = angular_geometry((10.0, 9.9, 9.8, 9.7), 12)
+        inputs = (rays, (0.1, 0.1, 0.1), (1, 1, 1, 1), (1, 1.1, 1.3, 1.7),
+                  (0.2, 0.2, 0.2, 0.2), (50, 50, 50, 50))
+        direct = solve_wavelength(*inputs, max_iterations=0)
+        iterative = solve_wavelength(*inputs, tolerance=1e-11, max_iterations=500)
+        self.assertLess(iterative[-1], 500)
+        for x, y in zip(direct[:3], iterative[:3]):
+            for a, b in zip(x, y):
+                self.assertAlmostEqual(a, b, places=8)
+
     def test_transparent_shell_preserves_core_luminosity(self):
         radii = (3.0, 2.8, 2.5, 2.0)
         rays = disk_rays(radii, core_rays=12)
@@ -157,16 +171,20 @@ class TransferChecks(unittest.TestCase):
             return None, None, radiative, None, None, None, convection
 
         boundary = SimpleNamespace(reference_radius=1)
+        progress = []
         with (
             patch("spherical_heating.boundary_from_marcs", return_value=(boundary, None)),
             patch("spherical_heating.reconstruct_for_transfer", side_effect=lambda profile, **_: (profile, None)),
             patch("spherical_heating.evaluate", side_effect=transfer),
         ):
-            corrected, _, history, knots, start = balance_all_layers(model, (), (), {}, upper_knots=2)
+            corrected, _, history, knots, start = balance_all_layers(
+                model, (), (), {}, upper_knots=2, progress=lambda step, metrics: progress.append((step, metrics))
+            )
 
         self.assertEqual(start, 5)
         self.assertEqual(knots, (0, 4, 5, 6, 7))
         self.assertEqual(len(history), 2)
+        self.assertEqual(progress, list(enumerate(history)))
         self.assertLess(history[-1][1], 1e-8)
         for row, initial in zip(corrected.structure, rows):
             self.assertAlmostEqual(row[3], 1.01*initial[3], places=5)

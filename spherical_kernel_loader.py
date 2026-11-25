@@ -4,6 +4,10 @@ import ctypes as ct
 from pathlib import Path
 
 
+class ScatteringIterationLimit(RuntimeError):
+    """The compiled iteration exhausted its budget at one wavelength."""
+
+
 class CompiledKernel:
     def __init__(self, path, rays):
         library = ct.CDLL(str(Path(path).resolve()))
@@ -40,5 +44,5 @@ class CompiledKernel:
             self.mean, self.flux, self.heating,
         )
         if iterations < 0:
-            raise RuntimeError("Spherical scattering failed to converge in 200 iterations")
+            raise ScatteringIterationLimit("Spherical scattering exceeded 200 iterations")
         return self.mean, self.flux, self.heating, iterations

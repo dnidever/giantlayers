@@ -128,7 +128,7 @@ def native_rosseland(model, wavelengths, lines, mixture, tables, chemistry, vmic
         yield numerator/denominator
 
 
-def evaluate(model, mixture, rosseland=None, chemistry=None):
+def evaluate(model, mixture, rosseland=None, chemistry=None, radiative_acceleration=()):
     """Compute the mixing-length structure on the supplied pressure and radius grid."""
     chemistry = chemistry or Thermochemistry()
     enthalpy = Enthalpy(chemistry)
@@ -149,12 +149,18 @@ def evaluate(model, mixture, rosseland=None, chemistry=None):
     ref_flux = float(model.header[2].split()[0])
     if rosseland is None:
         rosseland = [row[1] for row in model.thermodynamics]
+    force = radiative_acceleration if len(radiative_acceleration) else (0.0,)*len(p)
+    if len(force) != len(p):
+        raise ValueError("Radiative acceleration must give a value at every layer")
     for i, (row, pressure, temperature, gradient, opacity, thermo) in enumerate(
         zip(model.structure, p, t, gradients, rosseland, model.thermodynamics), 1
     ):
         r = radius - row[2]
         density, cp, q, adiabatic = enthalpy.derivatives(temperature, pressure, abundances)
-        flux, velocity = henyey_flux(temperature, pressure, density, G*stellar_mass/r**2,
+        gravity = G*stellar_mass/r**2 - force[i-1]
+        if gravity <= 0:
+            raise ValueError("Mixing-length convection requires positive effective gravity")
+        flux, velocity = henyey_flux(temperature, pressure, density, gravity,
                                      opacity, gradient, cp, q, adiabatic, alpha, y, nu)
         target = ref_flux*(radius/r)**2
         yield (i, row[0], temperature, pressure, opacity, gradient, adiabatic, cp, q, velocity,

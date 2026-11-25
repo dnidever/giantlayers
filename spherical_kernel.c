@@ -60,8 +60,11 @@ int spherical_solve(int n, int rays, const int *offset, const int *core,
             start[k] = absorbed-end[k];
         }
         bottom[ray] = thermal[n-1];
-        if (core[ray] && distance >= 10 && radial[n-2] > 0)
-            bottom[ray] += mu_bottom[ray]*(thermal[n-1]-thermal[n-2])/radial[n-2];
+        if (core[ray] && radial[n-2] > 0) {
+            double x = fmax(0.0, fmin(1.0, (distance-5.0)/10.0));
+            double increment = mu_bottom[ray]*(thermal[n-1]-thermal[n-2])/radial[n-2];
+            bottom[ray] = fmax(0.0, bottom[ray] + x*x*(3.0-2.0*x)*increment);
+        }
         double tangent_transmission = 1.0;
         for (int i = last; i >= 0; --i) {
             int k = base + i;

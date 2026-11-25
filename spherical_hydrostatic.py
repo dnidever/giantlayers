@@ -40,15 +40,17 @@ def integrate(cell_values, initial):
 
 
 def solve(column_mass, temperature, abundances, stellar_mass, gravity, surface_pressure,
-          reference_index, chemistry=None, tolerance=1e-8, max_iterations=60):
-    """Solve dP/dm = GM/r² and dr/dm = -1/rho on a radial column-mass grid.
+          reference_index, chemistry=None, tolerance=1e-8, max_iterations=60,
+          radiative_acceleration=()):
+    """Solve dPgas/dm = GM/r² - g_rad and dr/dm = -1/rho on a radial mass grid.
 
     Use cgs units, with stellar mass in grams. The column mass increases
     inward and is the radial integral of density. The layer at
-    reference_index is anchored to sqrt(GM/gravity).
+    reference_index is anchored to sqrt(GM/gravity). A fractional index
+    locates the reference radius between neighboring layers.
     """
     n = len(column_mass)
-    if (n < 2 or len(temperature) != n or not 0 <= reference_index < n
+    if (n < 2 or len(temperature) != n or not 0 <= reference_index <= n-1
             or not all(math.isfinite(x) and x >= 0 for x in column_mass)
             or any(a >= b for a, b in zip(column_mass, column_mass[1:]))
             or not all(math.isfinite(x) and x > 0 for x in
@@ -56,22 +58,32 @@ def solve(column_mass, temperature, abundances, stellar_mass, gravity, surface_p
             or max_iterations < 1):
         raise ValueError("Use increasing nonnegative column mass, a valid reference layer, and positive boundaries")
     chemistry = chemistry or Thermochemistry()
+    force = radiative_acceleration if len(radiative_acceleration) else (0.0,)*n
+    if len(force) != n or not all(map(math.isfinite, force)):
+        raise ValueError("Radiative acceleration must give a finite value at every layer")
     gm = G * stellar_mass
     reference_radius = math.sqrt(gm / gravity)
+    anchor_left = int(reference_index)
+    anchor_right = min(anchor_left + 1, n-1)
+    fraction = reference_index - anchor_left
     radii = [reference_radius] * n
     gas = [None] * n
     for iteration in range(1, max_iterations + 1):
-        local_g = [gm / r**2 for r in radii]
+        local_g = [gm/r**2 - a for r, a in zip(radii, force)]
+        if any(g <= 0 for g in local_g):
+            raise RuntimeError("Radiative acceleration reaches gravity on the hydrostatic grid")
         pressure = integrate(increments(column_mass, local_g), surface_pressure)
         gas = [chemistry.solve(t, p, abundances, initial=state)
                for t, p, state in zip(temperature, pressure, gas)]
         density = [state.mass_density for state in gas]
         thickness = integrate(increments(column_mass, [1 / rho for rho in density]), 0.0)
-        anchor = thickness[reference_index]
+        anchor = thickness[anchor_left] + fraction*(thickness[anchor_right]-thickness[anchor_left])
         updated_radius = [reference_radius + (anchor - depth) for depth in thickness]
         if any(r <= 0 for r in updated_radius):
             raise RuntimeError("Hydrostatic update reached a nonpositive radius")
-        new_gravity = [gm / r**2 for r in updated_radius]
+        new_gravity = [gm/r**2 - a for r, a in zip(updated_radius, force)]
+        if any(g <= 0 for g in new_gravity):
+            raise RuntimeError("Radiative acceleration reaches gravity on the hydrostatic grid")
         expected = increments(column_mass, new_gravity)
         actual = [b-a for a, b in zip(pressure, pressure[1:])]
         pressure_error = max(abs(a-b)/b for a, b in zip(actual, expected))
@@ -109,9 +121,10 @@ class HydrostaticBoundary:
     stellar_mass: float
     gravity: float
     surface_pressure: float
-    anchor: int
+    anchor: float
     abundances: dict
     chemistry: Thermochemistry
+    radiative_acceleration: tuple = ()
 
     @property
     def reference_radius(self):
@@ -119,7 +132,8 @@ class HydrostaticBoundary:
 
     def solve(self, temperature):
         return solve(self.column_mass, temperature, self.abundances, self.stellar_mass,
-                     self.gravity, self.surface_pressure, self.anchor, self.chemistry)
+                     self.gravity, self.surface_pressure, self.anchor, self.chemistry,
+                     radiative_acceleration=self.radiative_acceleration)
 
 
 def boundary_from_marcs(model, chemistry=None, mixture=None):
@@ -156,8 +170,8 @@ def reconstruct_for_transfer(model, chemistry=None, mixture=None, boundary=None)
     if boundary is None:
         boundary, _ = boundary_from_marcs(model, chemistry, mixture)
     solution = boundary.solve([row[3] for row in model.structure])
-    mass, anchor = boundary.column_mass, boundary.anchor
-    reference_radius = solution.radius[anchor]
+    mass = boundary.column_mass
+    reference_radius = boundary.reference_radius
     header = list(model.header)
     _, label = header[7].split(maxsplit=1)
     header[7] = f"{reference_radius:.17e} {label}"

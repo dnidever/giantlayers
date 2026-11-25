@@ -263,7 +263,7 @@ The outer temperature variables target adjacent-shell luminosity balance. The ph
 
 Use `--global-balance` to solve for the temperature profile with native spherical transfer, hydrostatic balance, and Henyey mixing-length convection. The target is the same total luminosity at every radius. Each trial recomputes the gas structure, chemistry, wavelength-dependent opacities, and radiative and convective fluxes on the input model's radial mass grid. The input mass, gravity, and surface gas pressure set the boundaries.
 
-GiantLayers identifies the contiguous region extending inward to the model's deepest layer where convection carries at least 0.01% of the target luminosity. Each layer in that region gets its own temperature variable. Above it, fractional temperature corrections are interpolated in the input model's log Rosseland depth between five control points by default. Change that number with `--upper-knots`. The solver evaluates the total luminosity error at every layer and accepts a step when the RMS error falls and the maximum absolute error does not increase.
+GiantLayers identifies the contiguous region extending inward to the model's deepest layer where convection carries at least 0.01% of the target luminosity. Each layer in that region gets its own temperature variable. Above it, fractional temperature corrections are interpolated in the input model's log Rosseland depth between five control points by default. Change that number with `--upper-knots`. The solver evaluates the total luminosity error at every layer. Its line search accepts a step when the RMS error plus one quarter of the maximum absolute error decreases.
 
 ```sh
 python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --global-balance --stride 400 --core-rays 24 --steps 1 --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > global-luminosity.csv
@@ -281,8 +281,36 @@ giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
   --steps 1 --output-model trial.mod > trial.csv
 ```
 
-The continuum-only example starts from an analytic gray temperature profile and an independent radial column-mass grid. Pass the published MARCS wavelength grid, an atomic transition CSV via `--lines`, and molecular tables via `--molecular-cross-section` for opacity sampling. The compiled kernel is especially helpful as the grid grows. `--stride` subsamples the supplied grid and `--verify-full` reevaluates the result on every input wavelength. Convergence is assessed against the maximum fractional luminosity error, with a default threshold of 1%.
+The continuum-only example starts from an analytic gray temperature profile and an independent radial column-mass grid. Pass the published MARCS wavelength grid, an atomic transition CSV via `--lines`, and molecular tables via `--molecular-cross-section` for opacity sampling. The compiled kernel is especially helpful as the grid grows. `--stride` subsamples the supplied grid and `--verify-full` reevaluates the result on every input wavelength. Convergence is assessed against the maximum fractional luminosity error, with a default threshold of 1%. Use repeatable `--refine-stride` options to solve sequentially on denser grids. `--steps` is the correction budget per grid. For long runs, `--checkpoint-csv` saves the accepted profile at each step. Use `--restart-csv` with the same mass-grid parameters to resume and `--steps 0` to evaluate the profile without temperature corrections.
 
-The MARCS-format export contains native thermochemical partial pressures, Rosseland and 5000 Å optical depth, convection, and the calculated gas structure. Its radius is anchored at the fixed mass coordinate selected from the seed. The atmospheric optical depths are evaluated after the solve and can place Rosseland depth one at a different radius. The export uses an isotropic LTE estimate for radiation pressure and zero turbulent pressure. The H₂⁺ column uses the absent-species sentinel, and the Other column sums the unlisted supported molecules. Files with large residuals are labeled unconverged.
+The MARCS-format export contains native thermochemical partial pressures, Rosseland and 5000 Å optical depth, convection, and the calculated gas structure. By default the radius is anchored at the fixed mass coordinate selected from the seed. Use `--photospheric-anchor` to update the reference radius coordinate to the computed Rosseland photosphere. The export uses an isotropic LTE estimate for radiation pressure and zero turbulent pressure. The H₂⁺ column uses the absent-species sentinel, and the Other column sums the unlisted supported molecules. Files with large residuals are labeled unconverged.
 
-Use the reference atmosphere runs above to benchmark differences from MARCS. The experimental solver uses a limited species and opacity set, gas-pressure hydrostatic balance, and a prescribed radial column-mass grid. Inspect sensitivity to the chosen outer pressure, bottom mass, and transfer grids before using the result quantitatively.
+Use the reference atmosphere runs above to benchmark differences from MARCS. The experimental solver uses a limited species and opacity set and a prescribed radial column-mass grid. Inspect sensitivity to the chosen outer pressure, bottom mass, and transfer grids before using the result quantitatively.
+
+
+### Diagnose radiative equilibrium in the outer layers
+
+The native CSV includes the Rosseland mean and the ratio of net radiative heating to LTE thermal emission at each layer. An optically thin layer can have substantial local heating while barely changing the total luminosity. Set `--outer-heating-weight 0.1` to include that local balance in the trial objective. The weight falls exponentially with the initial Rosseland depth on a scale of 0.03. The luminosity status printed by the command is based on total flux. Check the heating column as well when fitting both terms.
+
+The continuum includes coherent electron scattering and Rayleigh scattering by H I, H₂, and He I. The Rayleigh terms use long-wavelength expansions on the red side of the first resonance. The transfer solves those opacities with an isotropic coherent source. When accelerated scattering iterations reach their budget, GiantLayers solves the linear source equation directly. [H I cross section](https://adsabs.harvard.edu/pdf/1964ApJ...140.1381S) · [H₂ cross section](https://adsabs.harvard.edu/pdf/1962apj...136..690d) · [He I cross section](https://arxiv.org/abs/1601.01005)
+
+### Convert ExoMolOP opacity tables
+
+Download a TauREx HDF5 cross-section table for the desired isotopologue and convert it into the JSON format used by the solver. The optional h5py dependency is used by the converter. The transfer command reads the resulting table using Python's standard library.
+
+```sh
+python3 -m pip install '.[exomol]'
+python3 -m exomol_import TiO.xsec.TauREx.h5 tio.json.gz --species TiO \
+  --isotope-fraction 0.7372 --temperature-range 2200 3400 --pressure-range 10 10000
+```
+
+The output keeps the native wavelength samples in increasing vacuum Å and converts pressure from bar to dyn/cm². The temperature and pressure ranges select tabulated points inclusively. Each selected axis needs at least two points. The solver clamps values outside the supplied temperature and pressure range. Provide tables that cover the line-forming layers and include the contributing isotopologues for your mixture. [ExoMolOP data and formats](https://arxiv.org/abs/2009.00687)
+
+
+### Update the spherical hydrostatic boundary
+
+With `--photospheric-anchor`, GiantLayers integrates the native Rosseland opacity through the radial column mass and locates optical depth one between layers. The solver sets the gravity specified by `--logg` at that interpolated radius. The grid must bracket the photosphere.
+
+The native CSV also contains the radiative acceleration from the frequency integral of flux times mass extinction divided by the speed of light. With `--radiative-force`, GiantLayers subtracts that acceleration from gravity when it updates gas pressure and the mixing-length pressure scale. The solver requires positive effective gravity on the mass grid. By default, the acceleration is reported and hydrostatic balance uses gravity alone.
+
+The optional boundary updates use the latest solved profile between wavelength stages. After the final wavelength stage, GiantLayers iterates the boundary and hydrostatic structure at fixed temperature and reports the resulting luminosity error.

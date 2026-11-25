@@ -1,5 +1,6 @@
 """Populate MARCS-format fields from a computed GiantLayers atmosphere."""
 
+from bisect import bisect_left
 from dataclasses import replace
 import math
 
@@ -25,8 +26,24 @@ def _log(value):
     return math.log10(value) if value > 1e-99 else -99.0
 
 
-def _optical_depth(column, opacity, exterior_column):
-    return list(map(_log, integrate(increments(column, opacity), exterior_column*opacity[0])))
+def optical_depth(column, opacity, exterior_column):
+    return integrate(increments(column, opacity), exterior_column*opacity[0])
+
+
+def exterior_column(model, boundary):
+    outer_radius = boundary.reference_radius - model.structure[0][2]
+    return boundary.surface_pressure*outer_radius**2/(G*boundary.stellar_mass)
+
+
+def photospheric_anchor(model, boundary, result):
+    """Interpolate the radial layer index at Rosseland optical depth one."""
+    rosseland = [row[4] for row in result[7]]
+    depth = optical_depth(boundary.column_mass, rosseland, exterior_column(model, boundary))
+    if not depth[0] < 1 < depth[-1]:
+        raise ValueError("The column-mass grid must bracket Rosseland optical depth one")
+    hi = bisect_left(depth, 1.0)
+    lo = hi - 1
+    return lo + (1 - depth[lo])/(depth[hi] - depth[lo])
 
 
 def _partial_pressures(gas, pressure, chemistry):
@@ -49,9 +66,9 @@ def build_document(model, result, lines, tables, boundary, vmic):
     convection = result[7]
     rosseland = [row[4] for row in convection]
     radius = boundary.reference_radius
-    exterior_column = boundary.surface_pressure*(radius-model.structure[0][2])**2/(G*boundary.stellar_mass)
-    ross = _optical_depth(boundary.column_mass, rosseland, exterior_column)
-    tau5000 = _optical_depth(boundary.column_mass, k5000, exterior_column)
+    exterior = exterior_column(model, boundary)
+    ross = list(map(_log, optical_depth(boundary.column_mass, rosseland, exterior)))
+    tau5000 = list(map(_log, optical_depth(boundary.column_mass, k5000, exterior)))
     structure, thermo, partial = [], [], []
     for row, layer, lr, l5, conv, column in zip(
         model.structure, layers, ross, tau5000, convection, boundary.column_mass
@@ -63,7 +80,7 @@ def build_document(model, result, lines, tables, boundary, vmic):
         total_particles = math.fsum(gas.number_densities.values())
         molecular_weight = gas.mass_density/(total_particles*AMU)
         thermo.append((lr, conv[4], gas.mass_density, molecular_weight, conv[9], conv[12],
-                       column+exterior_column))
+                       column+exterior))
         partial.append(_partial_pressures(gas, pressure, chemistry))
 
     abundances = boundary.abundances

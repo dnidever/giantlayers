@@ -62,8 +62,23 @@ def composition(reference, config):
             for e, value in reference.items()}
 
 
+def rayleigh_cross_sections(wavelength, photon_ev):
+    """Ground-state H I, H₂ and He I scattering in cm² per particle."""
+    inv_wave2 = (1/wavelength)**2
+    # Use the long-wavelength expansions on the red side of the resonances.
+    # Strom & Avrett 1964, Eq. 15, and Dalgarno & Williams 1962, Eq. 3.
+    hydrogen = (inv_wave2**2*(5.799e-13 + inv_wave2*(1.422e-6 + 2.784*inv_wave2))
+                if wavelength > 1216 else 0.0)
+    molecular = (inv_wave2**2*(8.14e-13 + inv_wave2*(1.28e-6 + 1.61*inv_wave2))
+                 if wavelength > 1200 else 0.0)
+    # Colgan et al. 2016, Eq. 7.
+    x2 = (photon_ev/(2*13.6057))**2
+    helium = THOMSON*x2**2*(1.913 + x2*(4.52 + 7.90*x2)) if wavelength > 584 else 0.0
+    return hydrogen, molecular, helium
+
+
 def continuum_opacity(wavelength, gas, ion_density):
-    """Return LTE absorption and coherent electron scattering in cm²/g."""
+    """Return LTE absorption and coherent electron and Rayleigh scattering in cm²/g."""
     frequency = C_ANGSTROM_S / wavelength
     kt_ev = K_EV * gas.temperature
     photon_ev = H_EV_S * frequency
@@ -83,7 +98,11 @@ def continuum_opacity(wavelength, gas, ion_density):
     # Thermal electron–ion free-free, singly charged ions and unit Gaunt factor.
     ion_ff = (3.692e8 * gas.electron_density * ion_density
               / (gas.mass_density * math.sqrt(gas.temperature) * frequency**3))
-    scattering = THOMSON * gas.electron_density / gas.mass_density
+    h_rayleigh, h2_rayleigh, he_rayleigh = rayleigh_cross_sections(wavelength, photon_ev)
+    neutral = gas.number_densities
+    scattering = (THOMSON*gas.electron_density + h_rayleigh*neutral["H"]
+                  + h2_rayleigh*neutral.get("H2", 0.0)
+                  + he_rayleigh*neutral.get("He", 0.0))/gas.mass_density
     return bound_free + free_free + stimulated * (hydrogen_bf + ion_ff), scattering
 
 

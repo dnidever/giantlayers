@@ -7,12 +7,25 @@ import unittest
 
 from giantlayers import initialize
 from lte_chemistry import Thermochemistry
+from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
 from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_rayleigh_cross_sections(self):
+        def cross_sections(wavelength):
+            return rayleigh_cross_sections(wavelength, H_EV_S*C_ANGSTROM_S/wavelength)
+
+        h, h2, he = cross_sections(5000)
+        self.assertAlmostEqual(h/1e-27, 1.026, places=3)
+        self.assertAlmostEqual(h2/1e-27, 1.3884, places=4)
+        self.assertGreater(he, 0)
+        for red, near in zip(cross_sections(100000), cross_sections(50000)):
+            self.assertAlmostEqual(near/red, 16, delta=0.02)
+        self.assertEqual(cross_sections(500), (0, 0, 0))
+
     def test_warm_equilibrium_matches_cold_solution(self):
         chemistry = Thermochemistry()
         abundance = {"H": 12, "He": 10.93, "C": 9.0, "O": 8.83, "Fe": 7.50}

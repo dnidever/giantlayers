@@ -12,14 +12,14 @@ from benchmark_sampling import nested_wavelengths
 from gray_atmosphere import propagate
 from lte_chemistry import Thermochemistry, _linear_solve
 from hminus import K_EV
-from lte_opacity import H_EV_S, layer_opacities, prepare_layers, read_lines
+from lte_opacity import H_EV_S, LIGHT, layer_opacities, prepare_layers, read_lines
 from mixing_length import evaluate as evaluate_convection
 from marcs_writer import read_document
 from molecular_cross_section import MolecularCrossSection
 from native_transfer import read_wavelengths, reference_flux_budget, spectral_quadrature
 from odf_transfer import planck_nu
-from spherical_hydrostatic import boundary_from_marcs, reconstruct_for_transfer
-from spherical_kernel_loader import CompiledKernel
+from spherical_hydrostatic import boundary_from_marcs, increments, integrate, reconstruct_for_transfer
+from spherical_kernel_loader import CompiledKernel, ScatteringIterationLimit
 from spherical_transfer import disk_rays, impact_parameters
 
 
@@ -70,8 +70,12 @@ class FormalTransfer:
             distance = [tau * scale for tau, scale in zip(optical_depths, ray.chord_scale)]
             endpoint = [_endpoint_weight(step) for step in distance]
             bottom = thermal[-1] if ray.core else None
-            if ray.core and sum(distance) >= 10 and optical_depths[-1] > 0:
-                bottom += ray.mu_bottom * (thermal[-1] - thermal[-2]) / optical_depths[-1]
+            if ray.core and optical_depths[-1] > 0:
+                # Blend the diffusion boundary over the optical-depth
+                # transition so a temperature perturbation cannot switch it abruptly.
+                x = max(0.0, min(1.0, (sum(distance) - 5)/10))
+                increment = ray.mu_bottom * (thermal[-1] - thermal[-2]) / optical_depths[-1]
+                bottom = max(0.0, bottom + x*x*(3-2*x)*increment)
             self.rays.append((ray, distance, bottom))
             last = len(distance)
             distance_to_tangent = 0.0
@@ -109,6 +113,22 @@ class FormalTransfer:
         return mean, flux
 
 
+def direct_scattering_source(transfer, thermal, fraction):
+    """Solve the linear scattering equation when iterative transfer stalls."""
+    n = len(thermal)
+    empty = [0.0] * n
+    background, _ = transfer.moments(empty, include_flux=False)
+    rhs = [(1 - w)*b + w*j for w, b, j in zip(fraction, thermal, background)]
+    matrix = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        unit = empty.copy()
+        unit[i] = 1.0
+        response, _ = transfer.moments(unit, include_flux=False)
+        for j, (w, base, lit) in enumerate(zip(fraction, background, response)):
+            matrix[j][i] = (i == j) - w*(lit - base)
+    return _linear_solve(matrix, rhs)
+
+
 def solve_wavelength(rays, radial_widths, density, thermal, absorption, scattering,
                      tolerance=1e-7, max_iterations=200):
     """Solve isotropic coherent scattering and return local true-absorption heating."""
@@ -136,7 +156,7 @@ def solve_wavelength(rays, radial_widths, density, thermal, absorption, scatteri
                     break
                 source = trial
             else:
-                raise RuntimeError(f"Spherical scattering failed to converge in {max_iterations} iterations")
+                source = direct_scattering_source(transfer, thermal, scatter_fraction)
     mean, flux = transfer.moments(source)
     heating = [4 * math.pi * k * (j - b) for k, j, b in zip(absorption, mean, thermal)]
     return mean, flux, heating, iterations
@@ -161,7 +181,8 @@ def shell_energy_budget(radii, density, flux, pointwise_heating):
 
 
 def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vmic=2.0,
-             include_scattering=True, chemistry=None, kernel_path=None, native_convection=False):
+             include_scattering=True, chemistry=None, kernel_path=None, native_convection=False,
+             hydrostatic_force=()):
     """Integrate spherical flux and heating on the supplied wavelength grid."""
     if float(model.header[5].split()[0]) <= 0:
         raise ValueError("A spherical MARCS atmosphere is required")
@@ -179,6 +200,8 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     max_iterations = 0
     rosseland_weight = [0.0] * len(layers)
     rosseland_inverse = [0.0] * len(layers)
+    emission = [0.0] * len(layers)
+    radiative_acceleration = [0.0] * len(layers)
     for start in range(0, len(wavelengths), 128):
         end = start + 128
         sample = wavelengths[start:end]
@@ -196,20 +219,29 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
                     weighted = weight * source * x / (-math.expm1(-x))
                     rosseland_weight[i] += weighted
                     rosseland_inverse[i] += weighted / (absorb + scatter)
+                    emission[i] += weight * 4 * math.pi * absorb * source
             try:
                 _, f, q, iterations = solver(rays, widths, density, thermal, absorption, scattering)
+            except ScatteringIterationLimit:
+                _, f, q, _ = solve_wavelength(rays, widths, density, thermal, absorption,
+                                              scattering, max_iterations=0)
+                iterations = 200
             except RuntimeError as exc:
                 raise RuntimeError(f"At {nu:.8g} Hz, {exc}") from exc
             max_iterations = max(max_iterations, iterations)
             for i, (local_flux, local_heating) in enumerate(zip(f, q)):
                 flux[i] += weight * local_flux
                 heating[i] += weight * local_heating
+                if native_convection:
+                    radiative_acceleration[i] += weight*local_flux*(absorption[i]+scattering[i])/LIGHT
     luminosity, shells, mismatch = shell_energy_budget(radii, density, flux, heating)
     result = (flux, heating, luminosity, shells, max_iterations, mismatch)
     if native_convection:
         means = [a / b for a, b in zip(rosseland_weight, rosseland_inverse)]
-        convection = tuple(evaluate_convection(model, composition, means, chemistry))
-        return (*result, tuple(row[11] for row in convection), convection)
+        convection = tuple(evaluate_convection(model, composition, means, chemistry, hydrostatic_force))
+        normalized_heating = tuple(q/e if e else 0.0 for q, e in zip(heating, emission))
+        return (*result, tuple(row[11] for row in convection), convection, normalized_heating,
+                tuple(radiative_acceleration))
     return result
 
 
@@ -340,15 +372,53 @@ def interpolate_corrections(axis, knots, values):
     return correction
 
 
+def temperature_direction(columns, residual):
+    """Regularize weak temperature controls to keep the trial step local."""
+    maximum = max(map(abs, residual))
+    weights = [1 + 3*(abs(x)/maximum)**4 for x in residual]
+    weighted = [[w*x for w, x in zip(weights, column)] for column in columns]
+    weighted_residual = [w*x for w, x in zip(weights, residual)]
+    normal = [[math.fsum(a*b for a, b in zip(x, y)) for y in weighted] for x in weighted]
+    rhs = [-math.fsum(a*b for a, b in zip(column, weighted_residual)) for column in weighted]
+    damping = 1e-8 * max(normal[i][i] for i in range(len(columns)))
+    if damping == 0:
+        return rhs
+    for _ in range(12):
+        regularized = [row.copy() for row in normal]
+        for i in range(len(columns)):
+            regularized[i][i] += damping
+        direction = _linear_solve(regularized, rhs.copy())
+        largest = max(map(abs, direction))
+        if largest <= 0.03:
+            return direction
+        damping *= 4
+    return [x*0.03/largest for x in direction]
+
+
+def update_columns(columns, step, previous, current):
+    """Update the finite-difference Jacobian to satisfy the accepted secant."""
+    square = math.fsum(x*x for x in step)
+    remainder = [
+        (b - a - math.fsum(dx*column[i] for dx, column in zip(step, columns)))/square
+        for i, (a, b) in enumerate(zip(previous, current))
+    ]
+    return [[x + dx*r for x, r in zip(column, remainder)] for dx, column in zip(step, columns)]
+
+
 def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
-                       flux_tolerance=1e-8):
+                       flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
+                       on_accept=None):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
-    if steps < 1 or upper_knots < 2:
-        raise ValueError("Use at least one iteration and two upper temperature knots")
+    if steps < 0 or upper_knots < 2:
+        raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
     if not math.isfinite(flux_tolerance) or not 0 < flux_tolerance < 1:
         raise ValueError("Flux tolerance must be a fractional error between zero and one")
+    if jacobian_interval < 1:
+        raise ValueError("Jacobian interval must be at least one")
+    if not math.isfinite(outer_heating_weight) or outer_heating_weight < 0:
+        raise ValueError("Outer heating weight must be finite and nonnegative")
     if boundary is None:
         chemistry = Thermochemistry()
         boundary, _ = boundary_from_marcs(model, chemistry, composition)
@@ -363,8 +433,9 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
 
     def evaluate_trial(profile):
         current, _ = reconstruct_for_transfer(profile, boundary=boundary)
+        force = getattr(boundary, "radiative_acceleration", ())
         result = evaluate(current, wavelengths, lines, composition, tables, core_rays,
-                          vmic, include_scattering, chemistry, kernel_path, True)
+                          vmic, include_scattering, chemistry, kernel_path, True, force)
         convection = [
             4 * math.pi * (radius-row[2])**2 * flux / luminosity_target
             for row, flux in zip(current.structure, result[6])
@@ -376,10 +447,23 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         return (math.sqrt(math.fsum(x*x for x in residual)/len(residual)),
                 max(map(abs, residual)), residual[0], residual[-1])
 
-    current, result, residual, convection = evaluate_trial(model)
+    current, result, flux_residual, convection = evaluate_trial(model)
+    heating_weights = []
+    if outer_heating_weight:
+        rosseland = [row[4] for row in result[7]]
+        depths = integrate(increments(boundary.column_mass, rosseland), 0.0)
+        heating_weights = [outer_heating_weight*math.exp(-tau/0.03) for tau in depths]
+
+    def objective(evaluation, errors):
+        return [*errors, *(w*q for w, q in zip(heating_weights, evaluation[8]))] if heating_weights else errors
+
+    def merit(errors):
+        return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + 0.25*max(map(abs, errors))
+
+    residual = objective(result, flux_residual)
     knots, convective_start = global_temperature_knots(convection, upper_knots)
     parameters = [0.0] * len(knots)
-    history = [metrics(residual)]
+    history = [metrics(flux_residual)]
     if progress is not None:
         progress(0, history[-1])
 
@@ -393,9 +477,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             return None
         return evaluate_trial(replace(model, structure=structure))
 
-    for _ in range(steps):
-        if history[-1][1] <= flux_tolerance:
-            break
+    def finite_difference():
         columns = []
         for i in range(len(knots)):
             perturb = parameters.copy()
@@ -407,36 +489,49 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             if shifted is None:
                 raise RuntimeError("Cannot perturb a temperature knot within the LTE table")
             delta = perturb[i] - parameters[i]
-            columns.append([(b-a)/delta for a, b in zip(residual, shifted[2])])
-        normal = [[math.fsum(a*b for a, b in zip(x, y)) for y in columns] for x in columns]
-        rhs = [-math.fsum(a*b for a, b in zip(column, residual)) for column in columns]
-        curvature = max(normal[i][i] for i in range(len(columns)))
-        damping = 1e-8 * curvature
-        for _ in range(12):
-            regularized = [row.copy() for row in normal]
-            for i in range(len(columns)):
-                regularized[i][i] += damping
-            direction = _linear_solve(regularized, rhs)
-            if max(map(abs, direction)) <= 0.03:
-                break
-            damping *= 4
-        largest = max(map(abs, direction))
-        scale = min(1.0, 0.03/largest) if largest else 1.0
-        for _ in range(8):
+            trial_residual = objective(shifted[1], shifted[2])
+            columns.append([(b-a)/delta for a, b in zip(residual, trial_residual)])
+        return columns
+
+    def line_search(columns):
+        direction = temperature_direction(columns, residual)
+        if not any(direction):
+            return None
+        previous_merit = merit(residual)
+        scale = 1.0
+        for _ in range(6):
             candidate = [p + scale*d for p, d in zip(parameters, direction)]
             proposed = trial(candidate)
             if proposed is not None:
-                next_metrics = metrics(proposed[2])
-                if next_metrics[0] < history[-1][0] and next_metrics[1] <= history[-1][1]:
-                    current, result, residual, _ = proposed
-                    parameters = candidate
-                    history.append(next_metrics)
-                    if progress is not None:
-                        progress(len(history)-1, next_metrics)
-                    break
+                proposed_residual = objective(proposed[1], proposed[2])
+                if merit(proposed_residual) < previous_merit:
+                    return candidate, proposed, proposed_residual
             scale *= 0.5
-        else:
+        return None
+
+    columns = None
+    for step in range(steps):
+        if max(map(abs, residual)) <= flux_tolerance:
             break
+        fresh = columns is None or step % jacobian_interval == 0
+        if fresh:
+            columns = finite_difference()
+        accepted = line_search(columns)
+        if accepted is None and not fresh:
+            columns = finite_difference()
+            accepted = line_search(columns)
+        if accepted is None:
+            break
+        candidate, (current, result, flux_residual, _), next_residual = accepted
+        if jacobian_interval > 1:
+            delta = [b-a for a, b in zip(parameters, candidate)]
+            columns = update_columns(columns, delta, residual, next_residual)
+        parameters, residual = candidate, next_residual
+        history.append(metrics(flux_residual))
+        if progress is not None:
+            progress(len(history)-1, history[-1])
+        if on_accept is not None:
+            on_accept(current, result)
     return current, result, history, knots, convective_start
 
 
@@ -453,20 +548,25 @@ def write_balance_csv(stream, initial, model, result, native_convection):
     budget = [(c, f+c, target, (f+c-target)/target)
               for c, f, (_, _, target, _) in zip(convection, flux, budget)]
     writer = csv.writer(stream)
-    writer.writerow(("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
+    columns = ("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
                      "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",
                      "shell_to_next_heating_erg_g_s", "shell_to_next_heating_erg_s",
                      "convective_flux_erg_cm2_s" if native_convection else "marcs_convective_flux_erg_cm2_s",
                      "total_flux_erg_cm2_s",
                      "target_flux_erg_cm2_s", "relative_total_flux_error",
-                     "gas_pressure_dyn_cm2", "electron_pressure_dyn_cm2", "density_g_cm3", "radius_cm"))
+                     "gas_pressure_dyn_cm2", "electron_pressure_dyn_cm2", "density_g_cm3", "radius_cm")
+    extra = [()] * len(flux)
+    if native_convection:
+        columns += ("rosseland_mean_cm2_g", "relative_net_heating", "radiative_acceleration_cm_s2")
+        extra = [(row[4], heating, force) for row, heating, force in zip(*result[7:10])]
+    writer.writerow(columns)
     reference_radius = float(model.header[7].split()[0])
-    for i, (old, row, thermo, f, q, lum, shell, diagnostic) in enumerate(
+    for i, (old, row, thermo, f, q, lum, shell, diagnostic, native) in enumerate(
         zip(initial.structure, model.structure, model.thermodynamics, flux, heating, luminosity,
-            [*shells, ("", "")], budget), 1
+            [*shells, ("", "")], budget, extra), 1
     ):
         writer.writerow((i, old[3], row[3], thermo[-1], f, q, lum, *shell, *diagnostic,
-                         row[5], row[4], thermo[2], reference_radius - row[2]))
+                         row[5], row[4], thermo[2], reference_radius - row[2], *native))
     return budget
 
 
