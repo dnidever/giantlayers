@@ -155,3 +155,9 @@ For that refit, use the extended TiO and CO tables, the original ExoMolOP water 
 The refitted Doppler model's integrated flux was 0.29% below MARCS over the full sampled grid. It was 14.22% lower at 400–700 nm, 10.92% lower at 700–1,000 nm, and 1.82% higher at 1,000–2,500 nm. The improved luminosity closure and temperature RMS therefore coexist with substantial optical-band errors. These measurements refer to the temperature refit before any surface-only correction.
 
 Two surface-only corrections to the Doppler refit lowered its surface temperature from 1,883.3 to 1,868.3 K and reduced surface cooling from 3.24% to 1.11%. The full-grid maximum luminosity error remained 0.803%. A separate, weaker-regularization refit using the original opacities reached 0.857% maximum luminosity error, with nine adjacent inward temperature decreases and 8.96% surface cooling.
+
+## Diatomic equilibrium pressure units
+
+The bundled Barklem–Collet diatomic dissociation constants now convert the published pascal values to dyn/cm². This shifts their tabulated `log10(Kp)` by +1. The NASA-based polyatomic entries already use cgs units. All atmosphere trials described above used the earlier diatomic table and should be recomputed with the current table. [Barklem and Collet data](https://cdsarc.cds.unistra.fr/viz-bin/cat/J/A%2BA/588/A96)
+
+At the official MARCS temperatures and gas pressures, median TiO differences for three compositions went from +0.93–0.94 dex to between −0.010 and −0.003 dex after the correction. Across 46 layers per model from log Rosseland depth −4 to +1, TiO RMS differences are 0.026 dex and CO RMS differences are 0.010–0.011 dex. Electron-pressure RMS differences are below 0.0004 dex. CN still differs by about −0.08 dex in the median. [Official MARCS composition grids](https://marcs.astro.uu.se/data.html)

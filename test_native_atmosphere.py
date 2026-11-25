@@ -8,8 +8,8 @@ import unittest
 
 from collision_induced import HitranCIA
 from giantlayers import initialize, restart_temperatures
-from hminus import K_B
-from lte_chemistry import Thermochemistry
+from hminus import K_B, K_EV
+from lte_chemistry import AMU, Thermochemistry
 from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
@@ -91,6 +91,23 @@ class NativeAtmosphereChecks(unittest.TestCase):
         gas = SimpleNamespace(number_densities={"H2": 10.0}, mass_density=2.0, temperature=2500.0)
         opacity = table.mass_opacity(gas, 1e3, table.on_grid((1e8/150, 1e8/250)))
         self.assertEqual(opacity, [150.0, 0.0])
+
+    def test_tio_dissociation_constant_is_in_cgs_pressure_units(self):
+        chemistry = Thermochemistry()
+        temperature = 3000
+        index = chemistry.temperatures.index(temperature)
+        titanium, oxygen = (chemistry.atoms[name] for name in ("Ti", "O"))
+        ti_mass, o_mass = titanium["mass_amu"], oxygen["mass_amu"]
+        reduced_mass = AMU * ti_mass * o_mass / (ti_mass + o_mass)
+        partition_ratio = (titanium["neutral_q"][index] * oxygen["neutral_q"][index]
+                           / chemistry.molecules["TiO"]["q"][index])
+        thermal = K_B * temperature
+        expected = (2*math.pi*reduced_mass*thermal/(6.62607015e-27**2))**1.5
+        expected *= thermal * partition_ratio * math.exp(-6.869/(K_EV*temperature))
+        gas = chemistry.solve(temperature, 1000, {"H": 12, "Ti": 5.02, "O": 8.83})
+        densities = gas.number_densities
+        actual = thermal * densities["Ti"] * densities["O"] / densities["TiO"]
+        self.assertAlmostEqual(actual/expected, 1.0, delta=0.003)
 
     def test_polyatomic_carbon_species_follow_mass_action(self):
         chemistry = Thermochemistry()
