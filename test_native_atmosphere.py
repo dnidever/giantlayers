@@ -13,10 +13,24 @@ from lte_chemistry import Thermochemistry
 from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
+from spherical_heating import evaluate, evaluate_parallel
 from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_parallel_wavelength_bands_preserve_flux_and_rosseland_mean(self):
+        seed, boundary = initialize(3500, 1, 1, {"H": 12, "He": 10.93}, layers=7)
+        model, _ = reconstruct_for_transfer(seed, boundary=boundary)
+        wavelength = (1000., 3500., 7000., 15000., 40000., 120000.)
+        serial = evaluate(model, wavelength, (), {}, core_rays=4, chemistry=boundary.chemistry,
+                          native_convection=True)
+        parallel = evaluate_parallel(model, wavelength, (), {}, (), 4, 2, boundary.chemistry, None, 2)
+        for i in (0, 1, 6, 8, 9):
+            for a, b in zip(serial[i], parallel[i]):
+                self.assertTrue(math.isclose(a, b, rel_tol=1e-10, abs_tol=1e-12))
+        for a, b in zip(serial[7], parallel[7]):
+            self.assertTrue(math.isclose(a[4], b[4], rel_tol=1e-10))
+
     def test_cold_dense_chemistry_preserves_pressure_and_charge(self):
         chemistry = Thermochemistry()
         abundances = {"H": 12, "He": 10.93, "C": 9.0, "N": 7.92, "O": 8.83,

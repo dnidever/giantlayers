@@ -1,0 +1,28 @@
+# Validation
+
+## 3,500 K giant
+
+The main reference is the spherical MARCS GS98 giant at 3,500 K, log g = 1, one solar mass, and 2 km/s microturbulence. GiantLayers starts from an analytic temperature profile and independent radial column-mass grid. The reference supplies the comparison structure, abundance pattern, and wavelength axis. [MARCS model downloads](https://marcs.astro.uu.se/data.html) · [MARCS atmosphere methods](https://arxiv.org/abs/0805.0554)
+
+The trial uses a revised MARCS atomic transition subset and ExoMolOP cross sections for TiO, H₂O, VO, and CO. Run the atomic transition converter and the ExoMolOP converter described in the [Quickstart](quickstart.md). The example abundance file supplies the GS98 mixture.
+
+```sh
+cc -O3 -std=c99 -shared -fPIC spherical_kernel.c -o giantlayers-transfer.so -lm
+giantlayers flx_wavelengths.vac.gz examples/solar-gs98.json \
+  --teff 3500 --logg 1 --mass 1 --layers 32 --core-rays 24 \
+  --stride 400 --refine-stride 160 --steps 8 --upper-knots 10 \
+  --kernel ./giantlayers-transfer.so --lines revised-atomic-lines.csv \
+  --molecular-cross-section tio.json.gz --molecular-cross-section water.json.gz \
+  --molecular-cross-section vo.json.gz --molecular-cross-section co.json.gz \
+  --checkpoint-csv checkpoint.csv --output-model trial.mod.gz > trial.csv
+```
+
+The startup and refinement grids contain 253 and 631 points, respectively. Reuse the same opacities and structure arguments with `--restart-csv trial.csv --stride 1 --steps 0 --workers 4` to evaluate the profile at all 100,724 MARCS wavelengths. Use the per-layer luminosity errors to distinguish convergence on the startup samples from convergence on the full grid.
+
+In the first independent 631-point trial, the RMS luminosity error was 5.00% and the largest layer error was 14.63%. Additional temperature controls reduced these to 2.26% and 6.83%. Evaluating that refined temperature profile on the complete grid gave 2.84% RMS, 6.95% maximum, +1.28% at the surface, and +0.17% at the bottom. Compared at common Rosseland depths, temperatures differed from MARCS by 120 K RMS over 55 reference layers. This run used 32 radial layers and the four molecular tables above.
+
+Compare temperature and pressures over the common optical depths with `python3 -m compare_atmospheres marcs-reference.mod.gz trial.mod.gz`. Confirm that each dataset covers the line-forming layers and check the results on finer depth and angle grids.
+
+## Analytic and software checks
+
+Run `python3 -m unittest discover -v`. The tests cover the constant-density hydrostatic sphere, the effect of radiative acceleration, scattering transfer, temperature corrections, chemical pressure and charge conservation, opacity interpolation, restart interpolation, and MARCS-format export.

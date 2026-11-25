@@ -9,4 +9,5 @@ nav:
   - Overview: index.md
   - Quickstart: quickstart.md
   - Spherical model: spherical.md
+  - Validation: validation.md
   - Gray atmosphere model: model.md

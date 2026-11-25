@@ -19,7 +19,8 @@ from marcs_writer import MarcsDocument, write_document
 from molecular_cross_section import MolecularCrossSection
 from native_marcs import build_document, photospheric_anchor
 from native_transfer import read_wavelengths
-from spherical_heating import balance_all_layers, evaluate, report_balance_step, write_balance_csv
+from spherical_heating import (balance_all_layers, evaluate, evaluate_parallel, report_balance_step,
+                               total_flux_budget, write_balance_csv)
 from spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_for_transfer
 
 
@@ -186,8 +187,12 @@ def main():
     parser.add_argument("--jacobian-interval", type=int, default=3,
                         help="Steps between finite-difference Jacobian refreshes")
     parser.add_argument("--kernel", type=Path, help="Optional compiled spherical transfer library")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Process count for fixed-profile transfer and full-grid verification")
     parser.add_argument("--flux-tolerance", type=float, default=0.01,
                         help="Maximum fractional luminosity error for convergence")
+    parser.add_argument("--require-flux-convergence", action="store_true",
+                        help="Exit with status 2 if the final luminosity error exceeds the tolerance")
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
@@ -204,6 +209,8 @@ def main():
                         help="Include radiative acceleration in the hydrostatic pressure balance")
     args = parser.parse_args()
     try:
+        if args.workers < 1 or not 0 < args.flux_tolerance < 1:
+            raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         abundances = json.loads(args.abundances.read_text(encoding="utf-8"))
         seed, boundary = initialize(
             args.teff, args.logg, args.mass, abundances, layers=args.layers,
@@ -237,12 +244,16 @@ def main():
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
 
-        def transfer_on_grid(surface_sample=None):
+        def transfer_on_grid(surface_sample=None, line_scale=1.0):
+            if args.workers > 1 and surface_sample is None:
+                return evaluate_parallel(model, wavelengths, lines, {}, tables, args.core_rays,
+                                         args.vmic, boundary.chemistry, args.kernel, args.workers,
+                                         boundary.radiative_acceleration, line_scale)
             return evaluate(model, wavelengths, lines, {}, tables, args.core_rays,
                             args.vmic, chemistry=boundary.chemistry,
                             kernel_path=args.kernel, native_convection=True,
                             hydrostatic_force=boundary.radiative_acceleration,
-                            surface_sample=surface_sample)
+                            surface_sample=surface_sample, line_scale=line_scale)
 
         update_structure = args.photospheric_anchor or args.radiative_force
         for index, (stride, line_scale) in enumerate(stages, 1):
@@ -250,16 +261,23 @@ def main():
             print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride}, "
                   f"line opacity {line_scale:.0%})",
                   file=sys.stderr, flush=True)
-            model, result, _, _, _ = balance_all_layers(
-                model, wavelengths, lines, {}, steps=args.steps, tables=tables,
-                core_rays=args.core_rays, vmic=args.vmic, kernel_path=args.kernel,
-                upper_knots=args.upper_knots, boundary=boundary, progress=report_balance_step,
-                flux_tolerance=args.flux_tolerance, jacobian_interval=args.jacobian_interval,
-                outer_heating_weight=args.outer_heating_weight,
-                on_accept=checkpoint if args.checkpoint_csv else None,
-                adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
-                line_scale=line_scale,
-            )
+            if args.steps == 0 and args.workers > 1:
+                model, _ = reconstruct_for_transfer(model, boundary=boundary)
+                result = transfer_on_grid(line_scale=line_scale)
+                errors = [row[-1] for row in total_flux_budget(model, result, True)]
+                rms = math.sqrt(math.fsum(x*x for x in errors)/len(errors))
+                report_balance_step(0, (rms, max(map(abs, errors)), errors[0], errors[-1]))
+            else:
+                model, result, _, _, _ = balance_all_layers(
+                    model, wavelengths, lines, {}, steps=args.steps, tables=tables,
+                    core_rays=args.core_rays, vmic=args.vmic, kernel_path=args.kernel,
+                    upper_knots=args.upper_knots, boundary=boundary, progress=report_balance_step,
+                    flux_tolerance=args.flux_tolerance, jacobian_interval=args.jacobian_interval,
+                    outer_heating_weight=args.outer_heating_weight,
+                    on_accept=checkpoint if args.checkpoint_csv else None,
+                    adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
+                    line_scale=line_scale,
+                )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
                                               args.radiative_force)
@@ -321,9 +339,10 @@ def main():
                       *document.header[1:])
             document = replace(document, header=header)
             write_document(document, args.output_model)
+        return 2 if args.require_flux_convergence and maximum > args.flux_tolerance else 0
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

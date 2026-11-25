@@ -2,20 +2,28 @@
 
 from dataclasses import replace
 import math
+from pathlib import Path
+import shutil
+import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from lte_opacity import C_ANGSTROM_S, line_opacity, sample_line_opacity
+from lte_opacity import C_ANGSTROM_S, LineProfiles, line_opacity, sample_line_opacity
 from marcs_writer import MarcsDocument
 from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, correct_temperatures,
                                shell_energy_budget, solve_wavelength, temperature_direction)
+from spherical_kernel_loader import CompiledKernel
 from spherical_transfer import disk_rays, surface_fluxes
 
 
 class TransferChecks(unittest.TestCase):
     def test_large_temperature_correction_reaches_step_limit(self):
         self.assertAlmostEqual(temperature_direction([[1.0]], [0.4])[0], -0.03)
+        strong, weak = temperature_direction([[10.0, 0.0], [0.0, 0.001]], [-0.2, 0.2])
+        self.assertAlmostEqual(strong, 0.02, places=6)
+        self.assertAlmostEqual(weak, -0.03, places=6)
 
     def test_direct_scattering_matches_converged_iteration(self):
         rays = angular_geometry((10.0, 9.9, 9.8, 9.7), 12)
@@ -27,6 +35,22 @@ class TransferChecks(unittest.TestCase):
         for x, y in zip(direct[:3], iterative[:3]):
             for a, b in zip(x, y):
                 self.assertAlmostEqual(a, b, places=8)
+
+    @unittest.skipUnless(shutil.which("cc"), "C compiler unavailable")
+    def test_compiled_direct_scattering_matches_python(self):
+        with TemporaryDirectory() as directory:
+            library = Path(directory)/"giantlayers-transfer.so"
+            source = Path(__file__).with_name("spherical_kernel.c")
+            subprocess.run(["cc", "-std=c99", "-O2", "-shared", "-fPIC", str(source),
+                            "-o", str(library), "-lm"], check=True, capture_output=True)
+            rays = angular_geometry((10.0, 9.95, 9.9, 9.85, 9.8), 12)
+            inputs = (rays, (0.05,)*4, (1,)*5, (1, 1.1, 1.3, 1.6, 1.7),
+                      (1e-5,)*5, (500,)*5)
+            expected = solve_wavelength(*inputs, max_iterations=0)
+            actual = CompiledKernel(library, rays)(*inputs, max_iterations=0)
+            for a, b in zip(expected[:3], actual[:3]):
+                for x, y in zip(a, b):
+                    self.assertTrue(math.isclose(x, y, rel_tol=1e-10, abs_tol=1e-12))
 
     def test_transparent_shell_preserves_core_luminosity(self):
         radii = (3.0, 2.8, 2.5, 2.0)
@@ -194,9 +218,11 @@ class TransferChecks(unittest.TestCase):
         transitions = (
             (C_ANGSTROM_S / 4000.2, 2e9, 0.0, 10),
             (C_ANGSTROM_S / 4000.4, 1e9, 0.3, 15),
+            (C_ANGSTROM_S / 1000, 2e9, 0.0, 12),
+            (C_ANGSTROM_S / 11000, 1e9, 0.8, 16),
         )
         expected = [line_opacity(C_ANGSTROM_S / w, transitions) for w in wavelengths]
-        actual = sample_line_opacity(wavelengths, transitions)
+        actual = sample_line_opacity(wavelengths, LineProfiles(transitions))
         for sampled, direct in zip(actual, expected):
             self.assertTrue(math.isclose(sampled, direct, rel_tol=1e-14))
 

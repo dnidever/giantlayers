@@ -1,10 +1,12 @@
 """Coherent spherical continuum scattering and LTE heating on a fixed MARCS profile."""
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import csv
 from dataclasses import dataclass, replace
 import json
 import math
+from multiprocessing import get_context
 from pathlib import Path
 import sys
 
@@ -244,8 +246,44 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
         convection = tuple(evaluate_convection(model, composition, means, chemistry, hydrostatic_force))
         normalized_heating = tuple(q/e if e else 0.0 for q, e in zip(heating, emission))
         return (*result, tuple(row[11] for row in convection), convection, normalized_heating,
-                tuple(radiative_acceleration))
+                tuple(radiative_acceleration), (rosseland_weight, rosseland_inverse, emission, density))
     return result
+
+
+def evaluate_parallel(model, wavelengths, lines, mixture, tables, core_rays, vmic,
+                      chemistry, kernel_path, workers, hydrostatic_force=(), line_scale=1.0):
+    """Integrate a fixed native atmosphere over overlapping wavelength bands."""
+    if len(wavelengths) < 2 or workers < 2:
+        raise ValueError("Parallel transfer requires two or more wavelengths and workers")
+    count = min(workers, len(wavelengths)-1)
+    indices = [(len(wavelengths)-1)*i//count for i in range(count+1)]
+    with ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn")) as executor:
+        futures = [
+            executor.submit(evaluate, model, wavelengths[a:b+1], lines, mixture, tables,
+                            core_rays, vmic, True, chemistry, kernel_path, True,
+                            hydrostatic_force, None, line_scale)
+            for a, b in zip(indices, indices[1:])
+        ]
+        parts = [future.result() for future in futures]
+    # The shared endpoints carry half-weights for the two neighboring
+    # intervals. Their sum yields the original wavelength quadrature.
+    flux = [math.fsum(values) for values in zip(*(part[0] for part in parts))]
+    heating = [math.fsum(values) for values in zip(*(part[1] for part in parts))]
+    acceleration = [math.fsum(values) for values in zip(*(part[9] for part in parts))]
+    numerator, denominator, emission = (
+        [math.fsum(values) for values in zip(*(part[10][i] for part in parts))]
+        for i in range(3)
+    )
+    density = parts[0][10][3]
+    radius = float(model.header[7].split()[0])
+    radii = [radius-row[2] for row in model.structure]
+    luminosity, shells, mismatch = shell_energy_budget(radii, density, flux, heating)
+    means = [a/b for a, b in zip(numerator, denominator)]
+    convection = tuple(evaluate_convection(model, mixture, means, chemistry, hydrostatic_force))
+    normalized = tuple(q/e if e else 0.0 for q, e in zip(heating, emission))
+    return (flux, heating, luminosity, shells, max(part[4] for part in parts), mismatch,
+            tuple(row[11] for row in convection), convection, normalized, acceleration,
+            (numerator, denominator, emission, density))
 
 
 def correct_temperatures(model, wavelengths, lines, composition, count, steps=1,
@@ -386,16 +424,26 @@ def temperature_direction(columns, residual):
     damping = 1e-8 * max(normal[i][i] for i in range(len(columns)))
     if damping == 0:
         return rhs
-    for _ in range(12):
-        regularized = [row.copy() for row in normal]
-        for i in range(len(columns)):
-            regularized[i][i] += damping
-        direction = _linear_solve(regularized, rhs.copy())
-        largest = max(map(abs, direction))
-        if largest <= 0.03:
-            return direction
-        damping *= 4
-    return [x*0.03/largest for x in direction]
+    for i, row in enumerate(normal):
+        row[i] += damping
+    direction = _linear_solve([row.copy() for row in normal], rhs.copy())
+    if max(map(abs, direction)) <= 0.03:
+        return direction
+
+    # Minimize the same linearized least-squares objective within the
+    # per-control step bounds. A weak mode at its bound does not shrink
+    # the step at all the other controls.
+    direction = [0.0] * len(columns)
+    for _ in range(100):
+        largest_change = 0.0
+        for i, row in enumerate(normal):
+            correction = (rhs[i]-math.fsum(a*x for a, x in zip(row, direction)))/row[i]
+            updated = max(-0.03, min(0.03, direction[i]+correction))
+            largest_change = max(largest_change, abs(updated-direction[i]))
+            direction[i] = updated
+        if largest_change < 1e-7:
+            break
+    return direction
 
 
 def update_columns(columns, step, previous, current):
@@ -557,12 +605,17 @@ def report_balance_step(step, metrics):
           f"surface {surface:+.3%}, bottom {bottom:+.3%}", file=sys.stderr, flush=True)
 
 
-def write_balance_csv(stream, initial, model, result, native_convection):
-    flux, heating, luminosity, shells, _, _ = result[:6]
+def total_flux_budget(model, result, native_convection):
+    flux = result[0]
     budget = list(reference_flux_budget(model, flux))
     convection = result[6] if native_convection else [row[0] for row in budget]
-    budget = [(c, f+c, target, (f+c-target)/target)
-              for c, f, (_, _, target, _) in zip(convection, flux, budget)]
+    return [(c, f+c, target, (f+c-target)/target)
+            for c, f, (_, _, target, _) in zip(convection, flux, budget)]
+
+
+def write_balance_csv(stream, initial, model, result, native_convection):
+    flux, heating, luminosity, shells, _, _ = result[:6]
+    budget = total_flux_budget(model, result, native_convection)
     writer = csv.writer(stream)
     columns = ("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
                      "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",

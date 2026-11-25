@@ -33,16 +33,19 @@ class CompiledKernel:
         block = ct.c_double * self.count
         self.mean, self.flux, self.heating = block(), block(), block()
 
-    def __call__(self, rays, widths, density, thermal, absorption, scattering):
+    def __call__(self, rays, widths, density, thermal, absorption, scattering,
+                 tolerance=1e-7, max_iterations=200):
         extinction = [(a + s) * rho for a, s, rho in zip(absorption, scattering, density)]
         radial = [w * (a + b) / 2 for w, a, b in zip(widths, extinction, extinction[1:])]
         vector = ct.c_double * self.count
         iterations = self.solve(
             self.count, self.ray_count, self.offsets, self.core, self.scale, self.mu,
             self.mean_weights, self.flux_weights, (ct.c_double * len(radial))(*radial),
-            vector(*thermal), vector(*absorption), vector(*scattering), 1e-7, 200,
+            vector(*thermal), vector(*absorption), vector(*scattering), tolerance, max_iterations,
             self.mean, self.flux, self.heating,
         )
+        if iterations == -2:
+            raise RuntimeError("The compiled spherical solver could not allocate ray workspace")
         if iterations < 0:
-            raise ScatteringIterationLimit("Spherical scattering exceeded 200 iterations")
+            raise ScatteringIterationLimit(f"Spherical scattering failed at limit {max_iterations}")
         return self.mean, self.flux, self.heating, iterations

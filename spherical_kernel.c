@@ -1,6 +1,7 @@
 /* Optional compiled wavelength kernel for spherical coherent scattering. */
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 static void moments(int n, int rays, const int *offset, const int *core,
                     const double *transmit, const double *start, const double *end,
@@ -29,13 +30,68 @@ static void moments(int n, int rays, const int *offset, const int *core,
     }
 }
 
+static int direct_scattering(int n, int rays, const int *offset, const int *core,
+                             const double *transmit, const double *start, const double *end,
+                             const double *bottom, const double *jw, const double *fw,
+                             const double *thermal, const double *fraction, double *source) {
+    double rhs[n], background[n], basis[n], response[n];
+    double (*matrix)[n] = malloc((size_t)n * sizeof(*matrix));
+    if (!matrix) return -2;
+    for (int i = 0; i < n; ++i) basis[i] = 0.0;
+    moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, background, NULL);
+    for (int column = 0; column < n; ++column) {
+        basis[column] = 1.0;
+        moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, response, NULL);
+        for (int row = 0; row < n; ++row)
+            matrix[row][column] = (row == column) - fraction[row]*(response[row]-background[row]);
+        basis[column] = 0.0;
+    }
+    for (int i = 0; i < n; ++i)
+        rhs[i] = (1.0-fraction[i])*thermal[i] + fraction[i]*background[i];
+
+    for (int i = 0; i < n; ++i) {
+        int pivot = i;
+        for (int row = i+1; row < n; ++row)
+            if (fabs(matrix[row][i]) > fabs(matrix[pivot][i])) pivot = row;
+        if (fabs(matrix[pivot][i]) < 1e-15) {
+            free(matrix);
+            return -1;
+        }
+        if (pivot != i) {
+            double swap = rhs[i];
+            rhs[i] = rhs[pivot];
+            rhs[pivot] = swap;
+            for (int j = i; j < n; ++j) {
+                swap = matrix[i][j];
+                matrix[i][j] = matrix[pivot][j];
+                matrix[pivot][j] = swap;
+            }
+        }
+        for (int row = i+1; row < n; ++row) {
+            double factor = matrix[row][i]/matrix[i][i];
+            rhs[row] -= factor*rhs[i];
+            for (int j = i+1; j < n; ++j)
+                matrix[row][j] -= factor*matrix[i][j];
+        }
+    }
+    for (int i = n-1; i >= 0; --i) {
+        double value = rhs[i];
+        for (int j = i+1; j < n; ++j) value -= matrix[i][j]*source[j];
+        source[i] = value/matrix[i][i];
+    }
+    free(matrix);
+    return 0;
+}
+
 int spherical_solve(int n, int rays, const int *offset, const int *core,
                     const double *scale, const double *mu_bottom,
                     const double *jw, const double *fw, const double *radial,
                     const double *thermal, const double *absorption, const double *scattering,
                     double tolerance, int max_iterations, double *mean, double *flux, double *heating) {
     int entries = offset[rays];
-    double transmit[entries], start[entries], end[entries], bottom[rays];
+    double *buffers = malloc((3*(size_t)entries + (size_t)rays) * sizeof(*buffers));
+    if (!buffers) return -2;
+    double *transmit = buffers, *start = transmit+entries, *end = start+entries, *bottom = end+entries;
     double diagonal[n], source[n], fraction[n], updated[n];
     double peak = 0.0;
     int has_scattering = 0;
@@ -97,10 +153,19 @@ int spherical_solve(int n, int rays, const int *offset, const int *core,
             for (int i = 0; i < n; ++i) source[i] = updated[i];
             if (error <= tolerance) break;
         }
-        if (iterations > max_iterations) return -1;
+        if (iterations > max_iterations) {
+            int status = direct_scattering(n, rays, offset, core, transmit, start, end, bottom,
+                                           jw, fw, thermal, fraction, source);
+            if (status < 0) {
+                free(buffers);
+                return status;
+            }
+            iterations = max_iterations;
+        }
     }
     moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, source, mean, flux);
     for (int i = 0; i < n; ++i)
         heating[i] = 12.56637061435917295385*absorption[i]*(mean[i]-thermal[i]);
+    free(buffers);
     return iterations;
 }

@@ -29,6 +29,34 @@ class Line:
     damping_s: float = 0.0
 
 
+class LineProfiles:
+    """Index Doppler line centers while retaining the full damped wings."""
+
+    def __init__(self, transitions):
+        self.transitions = tuple(transitions)
+        self.doppler = tuple(sorted(row for row in self.transitions if row[2] == 0))
+        self.centers = tuple(row[0] for row in self.doppler)
+        self.damped = tuple(row for row in self.transitions if row[2] != 0)
+        self.max_width = max((row[1] for row in self.doppler), default=0)
+
+    def __iter__(self):
+        return iter(self.transitions)
+
+    def __len__(self):
+        return len(self.transitions)
+
+    def __getitem__(self, index):
+        return self.transitions[index]
+
+    def band(self, low, high):
+        # The Doppler contribution vanishes in double precision beyond this
+        # interval. Damped lines have nonvanishing Lorentz wings.
+        margin = 17*self.max_width
+        left = bisect_left(self.centers, low-margin)
+        right = bisect_right(self.centers, high+margin)
+        return self.doppler[left:right] + self.damped
+
+
 def read_lines(path):
     """Read vacuum Å, lower excitation in eV and optional damping in s⁻¹."""
     with open(path, newline="", encoding="utf-8") as stream:
@@ -138,11 +166,13 @@ def line_opacity(frequency, transitions):
 
 def sample_line_opacity(wavelengths, transitions):
     """Accumulate Doppler lines only where the sampled Gaussian is nonzero."""
-    if not transitions:
+    if not wavelengths or not transitions:
         return [0.0] * len(wavelengths)
     frequencies = [-C_ANGSTROM_S / wavelength for wavelength in wavelengths]
     if any(a > b for a, b in zip(frequencies, frequencies[1:])):
         return [line_opacity(-frequency, transitions) for frequency in frequencies]
+    if isinstance(transitions, LineProfiles):
+        transitions = transitions.band(-frequencies[-1], -frequencies[0])
 
     gaussian_scale = math.sqrt(math.log(2) / math.pi)
     result = [0.0] * len(frequencies)
@@ -175,7 +205,7 @@ def prepare_layers(model, lines, config, vmic=2.0, chemistry=None):
         if unknown:
             raise ValueError(f"Unsupported line species: {', '.join(sorted(unknown))}")
         ions = math.fsum(n for species, n in gas.number_densities.items() if species.endswith("+"))
-        transitions = [profile_parameters(line, gas, vmic) for line in lines]
+        transitions = LineProfiles(profile_parameters(line, gas, vmic) for line in lines)
         yield gas, row[5], ions, transitions
 
 
