@@ -247,3 +247,13 @@ python3 mixing_length.py model.mod.gz > convection.csv
 ```
 
 Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from GiantLayers opacities. Add the atomic transition list with `--lines` and molecular tables with repeatable `--molecular-cross-section` arguments. Use `--hydrostatic` to evaluate convection on the reconstructed pressure and radius profile. These commands diagnose convection on a fixed temperature structure.
+
+### Recompute convection during the coupled solve
+
+Add `--native-convection` to use the Henyey flux in place of the benchmark's published convection. Each trial computes a Rosseland mean from the same line and continuum opacities used by spherical transfer. It then recomputes the convective flux from the trial temperature and gas pressure gradients and the native LTE equation of state.
+
+```sh
+python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --native-convection --adjust-layers 3 --adjust-deep 2 --steps 1 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-convection.csv
+```
+
+The outer temperature variables target adjacent-shell luminosity balance. The photospheric mode targets absolute surface luminosity, and `--adjust-deep` varies the deepest temperatures individually to target total luminosity at those layers. The solver reports these errors separately. This trial adjusts selected depths and retains the original radial mass grid and outer pressure.
