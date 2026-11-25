@@ -1,24 +1,23 @@
 # GiantLayers
 
-GiantLayers is an early-stage stellar atmosphere solver for cool giants.
+GiantLayers is an experimental spherical LTE stellar atmosphere solver for cool giants. It starts from effective temperature, surface gravity, stellar mass, and an elemental abundance mixture. The solver couples hydrostatic structure, LTE chemistry, wavelength-dependent radiative transfer with continuum scattering, and mixing-length convection. It writes a CSV with the luminosity residual at each layer and can export a MARCS-format model.
 
-The current prototype computes a gray, plane-parallel LTE atmosphere in hydrostatic and radiative equilibrium. It uses constant opacity and an Eddington two-stream closure. A formal ray sweep checks the radiative flux of the moment solution.
+## Install and run
 
-## Run the prototype
-
-Use Python 3. No third-party packages are required.
+From a repository checkout, install with Python 3.9 or newer.
 
 ```sh
-python3 gray_atmosphere.py --teff 4300 --logg 1.5 > atmosphere.csv
+python3 -m pip install .
+giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+  --teff 3500 --logg 1 --mass 1 --layers 12 --upper-knots 4 \
+  --steps 1 --output-model trial.mod > trial.csv
 ```
 
-The CSV contains optical depth, column mass, temperature, gas pressure, radiative flux, and relative flux residual. The program prints the maximum relative flux and hydrostatic residuals to standard error. Run with `--help` for the grid and opacity options.
+This continuum-only example exercises the solver and exporter. For a line-blanketed calculation, provide an atomic transition CSV with `--lines` and molecular cross sections with repeatable `--molecular-cross-section` options. The output identifies unconverged profiles. Check the maximum luminosity error and sensitivity to wavelength and depth resolution before using a model.
 
-The prototype is a numerical benchmark for future frequency-dependent opacity, convection, and spherical geometry.
+See the [quickstart](docs/quickstart.md) for input formats, opacity sources, and the optional compiled transfer kernel. The gray Eddington benchmark is available through `python3 gray_atmosphere.py`. Run the regression tests with `python3 -m unittest discover`.
 
 ## Documentation
-
-See the [documentation source](docs/index.md) for a quickstart and the model assumptions. To preview the site locally, install the documentation dependencies and run MkDocs.
 
 ```sh
 python3 -m pip install -r docs/requirements.txt

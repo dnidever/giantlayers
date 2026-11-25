@@ -19,7 +19,7 @@ from molecular_cross_section import MolecularCrossSection
 from native_transfer import read_wavelengths, reference_flux_budget, spectral_quadrature
 from odf_transfer import planck_nu
 from spherical_hydrostatic import boundary_from_marcs, reconstruct_for_transfer
-from spherical_kernel import CompiledKernel
+from spherical_kernel_loader import CompiledKernel
 from spherical_transfer import disk_rays, impact_parameters
 
 
@@ -208,10 +208,8 @@ def evaluate(model, wavelengths, lines, composition, tables=(), core_rays=12, vm
     result = (flux, heating, luminosity, shells, max_iterations, mismatch)
     if native_convection:
         means = [a / b for a, b in zip(rosseland_weight, rosseland_inverse)]
-        convective_flux = tuple(
-            row[11] for row in evaluate_convection(model, composition, means, chemistry)
-        )
-        return (*result, convective_flux)
+        convection = tuple(evaluate_convection(model, composition, means, chemistry))
+        return (*result, tuple(row[11] for row in convection), convection)
     return result
 
 
@@ -344,12 +342,18 @@ def interpolate_corrections(axis, knots, values):
 
 def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        tables=(), core_rays=12, vmic=2.0, include_scattering=True,
-                       kernel_path=None, upper_knots=5):
+                       kernel_path=None, upper_knots=5, boundary=None, progress=None,
+                       flux_tolerance=1e-8):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 1 or upper_knots < 2:
         raise ValueError("Use at least one iteration and two upper temperature knots")
-    chemistry = Thermochemistry()
-    boundary, _ = boundary_from_marcs(model, chemistry, composition)
+    if not math.isfinite(flux_tolerance) or not 0 < flux_tolerance < 1:
+        raise ValueError("Flux tolerance must be a fractional error between zero and one")
+    if boundary is None:
+        chemistry = Thermochemistry()
+        boundary, _ = boundary_from_marcs(model, chemistry, composition)
+    else:
+        chemistry = boundary.chemistry
     radius = boundary.reference_radius
     luminosity_target = 4 * math.pi * radius**2 * float(model.header[2].split()[0])
     baseline = model.structure
@@ -376,6 +380,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     knots, convective_start = global_temperature_knots(convection, upper_knots)
     parameters = [0.0] * len(knots)
     history = [metrics(residual)]
+    if progress is not None:
+        progress(0, history[-1])
 
     def trial(values):
         correction = interpolate_corrections(axis, knots, values)
@@ -388,7 +394,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         return evaluate_trial(replace(model, structure=structure))
 
     for _ in range(steps):
-        if history[-1][1] < 1e-8:
+        if history[-1][1] <= flux_tolerance:
             break
         columns = []
         for i in range(len(knots)):
@@ -404,10 +410,16 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             columns.append([(b-a)/delta for a, b in zip(residual, shifted[2])])
         normal = [[math.fsum(a*b for a, b in zip(x, y)) for y in columns] for x in columns]
         rhs = [-math.fsum(a*b for a, b in zip(column, residual)) for column in columns]
-        damping = 1e-8 * max(normal[i][i] for i in range(len(columns)))
-        for i in range(len(columns)):
-            normal[i][i] += damping
-        direction = _linear_solve(normal, rhs)
+        curvature = max(normal[i][i] for i in range(len(columns)))
+        damping = 1e-8 * curvature
+        for _ in range(12):
+            regularized = [row.copy() for row in normal]
+            for i in range(len(columns)):
+                regularized[i][i] += damping
+            direction = _linear_solve(regularized, rhs)
+            if max(map(abs, direction)) <= 0.03:
+                break
+            damping *= 4
         largest = max(map(abs, direction))
         scale = min(1.0, 0.03/largest) if largest else 1.0
         for _ in range(8):
@@ -419,11 +431,43 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                     current, result, residual, _ = proposed
                     parameters = candidate
                     history.append(next_metrics)
+                    if progress is not None:
+                        progress(len(history)-1, next_metrics)
                     break
             scale *= 0.5
         else:
             break
     return current, result, history, knots, convective_start
+
+
+def report_balance_step(step, metrics):
+    rms, maximum, surface, bottom = metrics
+    print(f"Step {step}: luminosity error RMS {rms:.3%}, maximum {maximum:.3%}, "
+          f"surface {surface:+.3%}, bottom {bottom:+.3%}", file=sys.stderr, flush=True)
+
+
+def write_balance_csv(stream, initial, model, result, native_convection):
+    flux, heating, luminosity, shells, _, _ = result[:6]
+    budget = list(reference_flux_budget(model, flux))
+    convection = result[6] if native_convection else [row[0] for row in budget]
+    budget = [(c, f+c, target, (f+c-target)/target)
+              for c, f, (_, _, target, _) in zip(convection, flux, budget)]
+    writer = csv.writer(stream)
+    writer.writerow(("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
+                     "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",
+                     "shell_to_next_heating_erg_g_s", "shell_to_next_heating_erg_s",
+                     "convective_flux_erg_cm2_s" if native_convection else "marcs_convective_flux_erg_cm2_s",
+                     "total_flux_erg_cm2_s",
+                     "target_flux_erg_cm2_s", "relative_total_flux_error",
+                     "gas_pressure_dyn_cm2", "electron_pressure_dyn_cm2", "density_g_cm3", "radius_cm"))
+    reference_radius = float(model.header[7].split()[0])
+    for i, (old, row, thermo, f, q, lum, shell, diagnostic) in enumerate(
+        zip(initial.structure, model.structure, model.thermodynamics, flux, heating, luminosity,
+            [*shells, ("", "")], budget), 1
+    ):
+        writer.writerow((i, old[3], row[3], thermo[-1], f, q, lum, *shell, *diagnostic,
+                         row[5], row[4], thermo[2], reference_radius - row[2]))
+    return budget
 
 
 def main():
@@ -485,14 +529,12 @@ def main():
             model, result, history, knots, start = balance_all_layers(
                 model, wavelengths, lines, composition, args.steps, tables, args.core_rays,
                 args.vmic, not args.absorption_only, args.kernel, args.upper_knots,
+                progress=report_balance_step,
             )
             print(f"Temperature controls: {', '.join(str(i+1) for i in knots)}", file=sys.stderr)
             if start < len(model.structure):
                 print(f"Deep convective region: layers {start+1}–{len(model.structure)}",
                       file=sys.stderr)
-            for step, (rms, maximum, surface, bottom) in enumerate(history):
-                print(f"Step {step}: luminosity error RMS {rms:.3%}, maximum {maximum:.3%}, "
-                      f"surface {surface:+.3%}, bottom {bottom:+.3%}", file=sys.stderr)
         elif args.adjust_layers:
             model, result, history = correct_temperatures(
                 model, wavelengths, lines, composition, args.adjust_layers, args.steps,
@@ -513,28 +555,10 @@ def main():
             result = evaluate(model, reference, lines, composition, tables,
                               args.core_rays, args.vmic, include_scattering=not args.absorption_only,
                               kernel_path=args.kernel, native_convection=args.native_convection)
-        flux, heating, luminosity, shells, iterations, mismatch = result[:6]
-        budget = list(reference_flux_budget(model, flux))
-        convection = result[6] if args.native_convection else [row[0] for row in budget]
-        budget = [(c, f+c, target, (f+c-target)/target)
-                  for c, f, (_, _, target, _) in zip(convection, flux, budget)]
+        budget = write_balance_csv(sys.stdout, initial, model, result, args.native_convection)
     except (IndexError, OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
-    writer = csv.writer(sys.stdout)
-    writer.writerow(("layer", "initial_temperature_K", "temperature_K", "column_mass_g_cm2", "radiative_flux_erg_cm2_s",
-                     "pointwise_heating_erg_g_s", "radiative_luminosity_erg_s",
-                     "shell_to_next_heating_erg_g_s", "shell_to_next_heating_erg_s",
-                     "convective_flux_erg_cm2_s" if args.native_convection else "marcs_convective_flux_erg_cm2_s",
-                     "total_flux_erg_cm2_s",
-                     "target_flux_erg_cm2_s", "relative_total_flux_error",
-                     "gas_pressure_dyn_cm2", "electron_pressure_dyn_cm2", "density_g_cm3", "radius_cm"))
-    reference_radius = float(model.header[7].split()[0])
-    for i, (old, row, thermo, f, q, lum, shell, diagnostic) in enumerate(
-        zip(initial.structure, model.structure, model.thermodynamics, flux, heating, luminosity,
-            [*shells, ("", "")], budget), 1
-    ):
-        writer.writerow((i, old[3], row[3], thermo[-1], f, q, lum, *shell, *diagnostic,
-                         row[5], row[4], thermo[2], reference_radius - row[2]))
+    iterations, mismatch = result[4:6]
     print(f"Surface total-flux error: {budget[0][-1]:+.3%}", file=sys.stderr)
     print(f"Maximum scattering iterations per wavelength: {iterations}", file=sys.stderr)
     print(f"Relative mismatch from trapezoidal integration of pointwise heating: {mismatch:+.3e}", file=sys.stderr)

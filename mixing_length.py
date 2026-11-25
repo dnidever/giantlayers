@@ -85,10 +85,10 @@ class Enthalpy:
         """Return Cp, the density derivative Q, and the adiabatic gradient."""
         lower = max(self.chemistry.temperatures[0], temperature*0.998)
         upper = min(self.chemistry.temperatures[-1], temperature*1.002)
-        a, b = (self.chemistry.solve(t, pressure, abundances) for t in (lower, upper))
+        gas = self.chemistry.solve(temperature, pressure, abundances)
+        a, b = (self.chemistry.solve(t, pressure, abundances, initial=gas) for t in (lower, upper))
         cp = (self(b)-self(a))/(upper-lower)
         q = math.log(a.mass_density/b.mass_density)/math.log(upper/lower)
-        gas = self.chemistry.solve(temperature, pressure, abundances)
         if cp <= 0 or q <= 0:
             raise ValueError(f"Invalid thermodynamic derivative at T={temperature:g} K and P={pressure:g}")
         adiabatic = pressure*q/(gas.mass_density*temperature*cp)

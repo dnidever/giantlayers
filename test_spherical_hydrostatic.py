@@ -7,7 +7,7 @@ from spherical_hydrostatic import G, solve
 
 
 class ConstantDensity:
-    def solve(self, temperature, pressure, abundances):
+    def solve(self, temperature, pressure, abundances, initial=None):
         return SimpleNamespace(mass_density=1e-8, electron_density=0.0)
 
 

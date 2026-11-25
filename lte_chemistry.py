@@ -3,6 +3,7 @@
 from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
+from importlib.resources import files
 import json
 import math
 from pathlib import Path
@@ -27,14 +28,18 @@ class GasState:
 class Thermochemistry:
     """Tabulated ionization and neutral molecular equilibrium data."""
 
-    def __init__(self, path=DEFAULT_TABLE):
-        with open(path, encoding="utf-8") as stream:
+    def __init__(self, path=None):
+        if path is None:
+            path = DEFAULT_TABLE if DEFAULT_TABLE.is_file() else files("giantlayers_data").joinpath(DEFAULT_TABLE.name)
+        elif not isinstance(path, Path):
+            path = Path(path)
+        with path.open(encoding="utf-8") as stream:
             values = json.load(stream)
         self.temperatures = values["temperatures"]
         self.atoms = values["atoms"]
         self.molecules = values["molecules"]
 
-    def solve(self, temperature, gas_pressure, abundances, tolerance=1e-10):
+    def solve(self, temperature, gas_pressure, abundances, tolerance=1e-10, initial=None):
         """Solve element conservation, charge neutrality and the ideal-gas law.
 
         Abundances are log epsilon values keyed by element symbol, with H=12.
@@ -146,23 +151,27 @@ class Thermochemistry:
         nuclei_scale = particles / math.fsum(ratios)
         x = [math.log(r * nuclei_scale) for r in ratios]
         x.extend((math.log(particles * 1e-4), math.log(nuclei_scale)))
+        mass_per_hydrogen = AMU * math.fsum(ratio * masses[e] for ratio, e in zip(ratios, elements))
+        if initial is not None:
+            x = [math.log(initial.number_densities[e]) for e in elements]
+            x.extend((math.log(initial.electron_density),
+                      math.log(initial.mass_density/mass_per_hydrogen)))
+        residual, jacobian, populations = system(x)
         for _ in range(60):
-            residual, jacobian, populations = system(x)
             error = max(map(abs, residual))
             if error < tolerance:
                 numbers = dict.fromkeys(q, 0.0)
                 numbers.update((entry[0], n) for entry, n in zip(species, populations))
-                density = math.exp(x[-1]) * AMU * math.fsum(
-                    ratio * masses[e] for ratio, e in zip(ratios, elements)
-                )
+                density = math.exp(x[-1]) * mass_per_hydrogen
                 return GasState(temperature, numbers["e-"], density, numbers, q, masses, error)
             step = _linear_solve(jacobian, [-r for r in residual])
             scale = min(1.0, 4.0 / max(map(abs, step)))
             for _ in range(20):
                 trial = [a + scale * b for a, b in zip(x, step)]
-                next_residual, _, _ = system(trial)
+                next_residual, next_jacobian, next_populations = system(trial)
                 if max(map(abs, next_residual)) < error:
                     x = trial
+                    residual, jacobian, populations = next_residual, next_jacobian, next_populations
                     break
                 scale *= 0.5
             else:
@@ -180,11 +189,12 @@ def _linear_solve(matrix, rhs):
         diagonal = matrix[i][i]
         if abs(diagonal) < 1e-15:
             raise RuntimeError("Singular chemical-equilibrium Jacobian")
+        columns = [k for k in range(i + 1, size) if matrix[i][k]]
         for j in range(i + 1, size):
             if matrix[j][i] == 0:
                 continue
             factor = matrix[j][i] / diagonal
-            for k in range(i + 1, size):
+            for k in columns:
                 matrix[j][k] -= factor * matrix[i][k]
             rhs[j] -= factor * rhs[i]
     for i in range(size - 1, -1, -1):

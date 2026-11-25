@@ -270,3 +270,19 @@ python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json 
 ```
 
 The CSV contains the corrected structure and the relative total-flux error at every layer. Increase `--steps` to attempt additional corrections. For a wavelength-resolution check, add `--verify-full` to reevaluate the resulting profile across the full input wavelength grid.
+
+### Start from stellar parameters
+
+From a repository checkout, install with `python3 -m pip install .`. The `giantlayers` command takes a vacuum wavelength grid in Å and a JSON mapping from element symbols to absolute logarithmic abundances. For an element X, the abundance is log10(N_X/N_H) + 12. Include hydrogen as `"H": 12`. Edit a copy of `examples/solar-gs98.json` to set the abundances of your star. The example is the solar mixture tabulated in the GS98 MARCS grid; omitted elements are initialized to the trace abundance sentinel. [MARCS model grids](https://marcs.astro.uu.se/)
+
+```sh
+giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+  --teff 3500 --logg 1 --mass 1 --layers 12 --upper-knots 4 \
+  --steps 1 --output-model trial.mod > trial.csv
+```
+
+The continuum-only example starts from an analytic gray temperature profile and an independent radial column-mass grid. Pass the published MARCS wavelength grid, an atomic transition CSV via `--lines`, and molecular tables via `--molecular-cross-section` for opacity sampling. The compiled kernel is especially helpful as the grid grows. `--stride` subsamples the supplied grid and `--verify-full` reevaluates the result on every input wavelength. Convergence is assessed against the maximum fractional luminosity error, with a default threshold of 1%.
+
+The MARCS-format export contains native thermochemical partial pressures, Rosseland and 5000 Å optical depth, convection, and the calculated gas structure. Its radius is anchored at the fixed mass coordinate selected from the seed. The atmospheric optical depths are evaluated after the solve and can place Rosseland depth one at a different radius. The export uses an isotropic LTE estimate for radiation pressure and zero turbulent pressure. The H₂⁺ column uses the absent-species sentinel, and the Other column sums the unlisted supported molecules. Files with large residuals are labeled unconverged.
+
+Use the reference atmosphere runs above to benchmark differences from MARCS. The experimental solver uses a limited species and opacity set, gas-pressure hydrostatic balance, and a prescribed radial column-mass grid. Inspect sensitivity to the chosen outer pressure, bottom mass, and transfer grids before using the result quantitatively.

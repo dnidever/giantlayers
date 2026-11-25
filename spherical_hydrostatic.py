@@ -59,10 +59,12 @@ def solve(column_mass, temperature, abundances, stellar_mass, gravity, surface_p
     gm = G * stellar_mass
     reference_radius = math.sqrt(gm / gravity)
     radii = [reference_radius] * n
+    gas = [None] * n
     for iteration in range(1, max_iterations + 1):
         local_g = [gm / r**2 for r in radii]
         pressure = integrate(increments(column_mass, local_g), surface_pressure)
-        gas = [chemistry.solve(t, p, abundances) for t, p in zip(temperature, pressure)]
+        gas = [chemistry.solve(t, p, abundances, initial=state)
+               for t, p, state in zip(temperature, pressure, gas)]
         density = [state.mass_density for state in gas]
         thickness = integrate(increments(column_mass, [1 / rho for rho in density]), 0.0)
         anchor = thickness[reference_index]
