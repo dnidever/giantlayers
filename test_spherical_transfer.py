@@ -119,6 +119,30 @@ class TransferChecks(unittest.TestCase):
         self.assertAlmostEqual(updated.structure[0][5], 30.5)
         self.assertLess(history[-1][0], 1e-12)
 
+    def test_native_convection_controls_deep_luminosity_residual(self):
+        header = ("", "3500", "1", "", "", "", "", "1")
+        rows = ((-4, 0, 0, 3000), (0, 0, 0, 3500), (2, 0, 0, 4300), (3, 0, 0, 4500))
+        model = MarcsDocument(header, (), rows, ((0,) * 7,) * 4, ())
+        convection_temperatures = []
+
+        def transfer(trial, *args):
+            outer, photo, _, deep = [row[3] for row in trial.structure]
+            convection_temperatures.append(deep)
+            surface = 1 + (photo - 3450) * 1e-4
+            radiation = [4 * math.pi * x for x in
+                         (surface, surface + (outer - 3040) * 1e-4, 1.0, 0.6)]
+            convection = (0.0, 0.0, 0.0, 0.4 + (deep - 4600) * 1e-4)
+            return None, None, radiation, None, None, None, convection
+
+        with patch("spherical_heating.evaluate", side_effect=transfer):
+            corrected, _, history = correct_temperatures(
+                model, (), (), {}, 1, luminosity_target=True, native_convection=True, deep_layers=1
+            )
+        self.assertGreater(len(set(convection_temperatures)), 2)
+        self.assertLess(max(map(abs, history[-1])), 1e-12)
+        for row, expected in zip(corrected.structure, (3040, 3450, 4300, 4600)):
+            self.assertAlmostEqual(row[3], expected)
+
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
         transitions = (
