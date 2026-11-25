@@ -161,3 +161,11 @@ Two surface-only corrections to the Doppler refit lowered its surface temperatur
 The bundled Barklem–Collet diatomic dissociation constants now convert the published pascal values to dyn/cm². This shifts their tabulated `log10(Kp)` by +1. The NASA-based polyatomic entries already use cgs units. All atmosphere trials described above used the earlier diatomic table and should be recomputed with the current table. [Barklem and Collet data](https://cdsarc.cds.unistra.fr/viz-bin/cat/J/A%2BA/588/A96)
 
 At the official MARCS temperatures and gas pressures, median TiO differences for three compositions went from +0.93–0.94 dex to between −0.010 and −0.003 dex after the correction. Across 46 layers per model from log Rosseland depth −4 to +1, TiO RMS differences are 0.026 dex and CO RMS differences are 0.010–0.011 dex. Electron-pressure RMS differences are below 0.0004 dex. CN still differs by about −0.08 dex in the median. [Official MARCS composition grids](https://marcs.astro.uu.se/data.html)
+
+Run the fixed-structure check against any complete MARCS atmosphere with:
+
+```sh
+python -m compare_marcs_chemistry reference.mod.gz --min-log-tau -4 --max-log-tau 1
+```
+
+The command uses the official element-by-element abundances, temperatures, and gas pressures. It reports the differences in electron, CO, CN, water, and TiO partial pressures before any atmospheric temperature or density fitting.
