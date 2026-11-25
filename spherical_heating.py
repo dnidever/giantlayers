@@ -516,7 +516,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        kernel_path=None, upper_knots=5, boundary=None, progress=None,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
-                       jacobian_workers=1, flux_offset=()):
+                       jacobian_workers=1, flux_offset=(), heating_offset=()):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -543,6 +543,9 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     flux_offset = tuple(flux_offset) or (0.0,)*len(baseline)
     if len(flux_offset) != len(baseline) or not all(map(math.isfinite, flux_offset)):
         raise ValueError("The luminosity offset must contain a finite value at every layer")
+    heating_offset = tuple(heating_offset) or (0.0,)*len(baseline)
+    if len(heating_offset) != len(baseline) or not all(map(math.isfinite, heating_offset)):
+        raise ValueError("The heating offset must contain a finite value at every layer")
     axis = tuple(row[0] for row in baseline)
     if any(a >= b for a, b in zip(axis, axis[1:])):
         raise ValueError("Reference log Rosseland depth must increase inward")
@@ -563,7 +566,10 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         heating_weights = [outer_heating_weight*math.exp(-tau/0.03) for tau in depths]
 
     def objective(evaluation, errors):
-        return [*errors, *(w*q for w, q in zip(heating_weights, evaluation[8]))] if heating_weights else errors
+        if not heating_weights:
+            return errors
+        return [*errors, *(w*(q+offset) for w, q, offset in
+                           zip(heating_weights, evaluation[8], heating_offset))]
 
     def merit(errors):
         return math.sqrt(math.fsum(x*x for x in errors)/len(baseline)) + peak_weight*max(map(abs, errors))

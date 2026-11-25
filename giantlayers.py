@@ -277,14 +277,18 @@ def main():
             print(f"Solving on {len(wavelengths):,} wavelengths (stride {stride}, "
                   f"line opacity {line_scale:.0%})",
                   file=sys.stderr, flush=True)
-            flux_offset = ()
+            flux_offset = heating_offset = ()
             if args.full_grid_correction and index == len(stages) and args.steps > 0 and wavelengths != reference:
                 print(f"Calibrating the residuals on {len(reference):,} wavelengths",
                       file=sys.stderr, flush=True)
                 model, _ = reconstruct_for_transfer(model, boundary=boundary)
-                sampled = total_flux_budget(model, transfer_on_grid(), True)
-                exact = total_flux_budget(model, transfer_on_grid(grid=reference), True)
+                sampled_transfer = transfer_on_grid()
+                exact_transfer = transfer_on_grid(grid=reference)
+                sampled = total_flux_budget(model, sampled_transfer, True)
+                exact = total_flux_budget(model, exact_transfer, True)
                 flux_offset = tuple(b[-1]-a[-1] for a, b in zip(sampled, exact))
+                if args.outer_heating_weight:
+                    heating_offset = tuple(b-a for a, b in zip(sampled_transfer[8], exact_transfer[8]))
                 print("Iteration errors use the calibrated luminosity target",
                       file=sys.stderr, flush=True)
             if args.steps == 0 and args.workers > 1:
@@ -302,7 +306,8 @@ def main():
                     outer_heating_weight=args.outer_heating_weight,
                     on_accept=checkpoint if args.checkpoint_csv else None,
                     adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
-                    line_scale=line_scale, jacobian_workers=args.workers, flux_offset=flux_offset,
+                    line_scale=line_scale, jacobian_workers=args.workers,
+                    flux_offset=flux_offset, heating_offset=heating_offset,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,

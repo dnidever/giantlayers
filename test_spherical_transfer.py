@@ -229,6 +229,27 @@ class TransferChecks(unittest.TestCase):
         for row, initial in zip(corrected.structure, rows):
             self.assertAlmostEqual(row[3], 1.01*initial[3], places=5)
 
+    def test_full_grid_heating_offset_changes_surface_temperature(self):
+        header = ("", "3500", "1", "", "", "", "", "1")
+        rows = tuple((i, 0, 0, 3000.) for i in range(4))
+        model = MarcsDocument(header, (), rows, ((0,) * 7,) * 4, ())
+        boundary = SimpleNamespace(reference_radius=1, column_mass=(0, 1, 2, 3))
+
+        def transfer(trial, *args):
+            heating = ((trial.structure[0][3]-3000)/100, 0., 0., 0.)
+            return (None, None, (4*math.pi,)*4, None, None, None, (0.,)*4,
+                    ((0., 0., 0., 0., 1.),)*4, heating)
+
+        with (
+            patch("spherical_heating.boundary_from_marcs", return_value=(boundary, None)),
+            patch("spherical_heating.reconstruct_for_transfer", side_effect=lambda profile, **_: (profile, None)),
+            patch("spherical_heating.evaluate", side_effect=transfer),
+        ):
+            corrected, _, _, _, _ = balance_all_layers(
+                model, (), (), {}, outer_heating_weight=1, heating_offset=(.03, 0., 0., 0.)
+            )
+        self.assertAlmostEqual(corrected.structure[0][3], 2997., places=5)
+
     def test_indexed_line_sampling_matches_direct_sum(self):
         wavelengths = [4000 + i * 0.01 for i in range(101)]
         transitions = (
