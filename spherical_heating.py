@@ -596,9 +596,9 @@ def log_temperature_curvature(axis, structure):
         yield temperatures[i] - ((1-fraction)*temperatures[i-1] + fraction*temperatures[i+1])
 
 
-def bracket_bottom(evaluate, point, result, lower, upper, tolerance):
-    """Try a bounded scalar correction, retaining the smallest measured bottom error."""
-    error = result[2][-1]
+def bracket_flux(evaluate, point, result, lower, upper, tolerance, layer=-1):
+    """Try a bounded scalar correction, retaining the smallest measured layer error."""
+    error = result[2][layer]
     best = point, result
     if abs(error) <= tolerance:
         return best
@@ -606,8 +606,8 @@ def bracket_bottom(evaluate, point, result, lower, upper, tolerance):
         if edge == point:
             continue
         trial = evaluate(edge)
-        edge_error = trial[2][-1]
-        if abs(edge_error) < abs(best[1][2][-1]):
+        edge_error = trial[2][layer]
+        if abs(edge_error) < abs(best[1][2][layer]):
             best = edge, trial
         if abs(edge_error) <= tolerance:
             return best
@@ -621,8 +621,8 @@ def bracket_bottom(evaluate, point, result, lower, upper, tolerance):
         fraction = min(0.9, max(0.1, -fa/(fb-fa)))
         x = a + fraction*(b-a)
         trial = evaluate(x)
-        fx = trial[2][-1]
-        if abs(fx) < abs(best[1][2][-1]):
+        fx = trial[2][layer]
+        if abs(fx) < abs(best[1][2][layer]):
             best = x, trial
         if abs(fx) <= tolerance:
             break
@@ -639,7 +639,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        flux_tolerance=1e-8, jacobian_interval=1, outer_heating_weight=0.0,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
                        jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=(),
-                       temperature_smoothness=0.0, bracket_bottom_flux=False):
+                       temperature_smoothness=0.0, bracket_bottom_flux=False, bracket_deep_layers=1):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -665,6 +665,8 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
     radius = boundary.reference_radius
     luminosity_target = 4 * math.pi * radius**2 * float(model.header[2].split()[0])
     baseline = model.structure
+    if not 1 <= bracket_deep_layers < len(baseline):
+        raise ValueError("Deep flux correction must leave at least one other layer")
     flux_offset = tuple(flux_offset) or (0.0,)*len(baseline)
     if len(flux_offset) != len(baseline) or not all(map(math.isfinite, flux_offset)):
         raise ValueError("The luminosity offset must contain a finite value at every layer")
@@ -709,8 +711,9 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
 
     residual = objective(current.structure, result, flux_residual)
     knots, convective_start = global_temperature_knots(convection, upper_knots)
+    deep_start = len(axis) - bracket_deep_layers
     if bracket_bottom_flux:
-        knots = tuple(sorted(set(knots) | {len(axis)-2, len(axis)-1}))
+        knots = tuple(sorted(set(knots) | set(range(deep_start-1, len(axis)))))
     parameters = [0.0] * len(knots)
     history = [metrics(flux_residual)]
     if progress is not None:
@@ -763,23 +766,28 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             if profile is not None:
                 proposed = evaluate_trial(profile)
                 proposed_residual = objective(proposed[0].structure, proposed[1], proposed[2])
-                if bracket_bottom_flux and scale == 1.0:
-                    def evaluate_bottom(value):
-                        trial_values = [*candidate[:-1], value]
+                proposed_merit = merit(proposed_residual)
+                if bracket_bottom_flux and (scale == 1.0 or proposed_merit < previous_merit):
+                    layer = max(range(deep_start, len(axis)), key=lambda i: abs(proposed[2][i]))
+                    control = knots.index(layer)
+
+                    def evaluate_deep(value):
+                        trial_values = candidate.copy()
+                        trial_values[control] = value
                         trial = trial_profile(trial_values)
                         return evaluate_trial(trial) if trial is not None else proposed
 
-                    bottom = baseline[-1][3]
-                    lower = max(chemistry.temperatures[0]/bottom - 1, parameters[-1] - 0.03)
-                    upper = min(chemistry.temperatures[-1]/bottom - 1, parameters[-1] + 0.03)
-                    # Keep endpoint roundoff inside the supported temperature range.
-                    lower = min(candidate[-1], math.nextafter(lower, candidate[-1]))
-                    upper = max(candidate[-1], math.nextafter(upper, candidate[-1]))
-                    value, corrected = bracket_bottom(evaluate_bottom, candidate[-1], proposed,
-                                                      lower, upper, flux_tolerance/4)
+                    temperature = baseline[layer][3]
+                    point = candidate[control]
+                    lower = max(chemistry.temperatures[0]/temperature - 1, parameters[control] - 0.03*scale)
+                    upper = min(chemistry.temperatures[-1]/temperature - 1, parameters[control] + 0.03*scale)
+                    lower = min(point, math.nextafter(lower, point))
+                    upper = max(point, math.nextafter(upper, point))
+                    value, corrected = bracket_flux(evaluate_deep, point, proposed, lower, upper,
+                                                    flux_tolerance/4, layer)
                     corrected_residual = objective(corrected[0].structure, corrected[1], corrected[2])
-                    if merit(corrected_residual) < merit(proposed_residual):
-                        candidate[-1] = value
+                    if merit(corrected_residual) < proposed_merit:
+                        candidate[control] = value
                         proposed, proposed_residual = corrected, corrected_residual
                 if merit(proposed_residual) < previous_merit:
                     return candidate, proposed, proposed_residual

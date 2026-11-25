@@ -209,6 +209,8 @@ def main():
                         help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--bracket-bottom-flux", action="store_true",
                         help="Stabilize the deepest luminosity residual with a bounded temperature correction")
+    parser.add_argument("--bracket-deep-layers", type=int, default=1,
+                        help="Choose the worst residual in this many deepest layers when bracketing")
     parser.add_argument("--temperature-smoothness", type=float, default=0.0,
                         help="Penalize short-scale log-temperature curvature during the fit")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
@@ -346,6 +348,7 @@ def main():
                     flux_offset=flux_offset, heating_offset=heating_offset, heating_scale=heating_scale,
                     temperature_smoothness=args.temperature_smoothness,
                     bracket_bottom_flux=args.bracket_bottom_flux,
+                    bracket_deep_layers=args.bracket_deep_layers,
                 )
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
