@@ -131,3 +131,27 @@ python -m compare_marcs_flux native.csv flx_wavelengths.vac.gz fiducial.flx.gz -
 ```
 
 Use repeatable `--band SHORT_NM LONG_NM` arguments for other ranges. The comparison requires an exact match between the native and MARCS wavelength arrays. These broad-band trapezoidal integrals compare statistical samples of flux per wavelength normalized to each model's reference radius. Line strengths and narrow-band integrals require dedicated spectrum synthesis. [MARCS flux format](https://marcs.astro.uu.se/docs.html)
+
+## Full-grid results for the high-temperature opacity trial
+
+The matched Doppler extensions use TiO ToTo through 4,900 K and CO Li2015 through 8,500 K, with the same recalculated samples up to 3,400 K in the capped controls. The published fiducial contains 100,724 wavelength samples. At the original GiantLayers temperature and hydrostatic structure, the extension moved individual luminosity residuals by up to 0.759 percentage points with CO alone, and 0.758 points with both molecules. Both largest shifts were inward at layer 50 (4,312 K). The two extension-induced changes differ by at most 0.007 percentage points across the depth grid. Four layers remain above the extended TiO grid, and all layers are covered in CO.
+
+The joint capped and extended Doppler models evaluated at the original temperatures had peak luminosity errors of 5.231% and 5.484%, respectively. The model using the original ExoMolOP inputs had a 0.851% peak error at those same temperatures. Changing the opacity preparation and line inputs moves the luminosity more than adding hotter slices in this benchmark. Refit the temperatures before using the Doppler inputs in a model. [TiO ToTo line list](https://www.exomol.com/data/molecules/TiO/48Ti-16O/Toto/) · [CO Li2015 line list](https://exomol.com/data/molecules/CO/12C-16O/Li2015/)
+
+With the original opacity inputs, applying temperature smoothness weight 0.25 reduced adjacent inward temperature decreases from 12 to 3, and the largest decrease fell from 203 to 138 K. The full-grid peak luminosity error was 1.756%, up from 0.851%. Surface cooling reached 18.86%, up from 1.61% of the local LTE emission. Over the same 47 MARCS Rosseland depths, the temperature RMS difference fell from 171 to 102 K. The original MARCS Fortran reader accepted the smoother export.
+
+The original GiantLayers fiducial's emergent flux integrated over the full grid was 0.33% below the published MARCS flux. On the same wavelengths it was 9.13% lower at 400–700 nm, 12.51% lower at 700–1,000 nm, and 1.45% higher at 1,000–2,500 nm. These band integrals show the wavelength redistribution that remains even with good total luminosity closure. [MARCS GS98 flux archive](https://marcs.astro.uu.se/data.html)
+
+Starting from the original 56-layer fiducial, one accepted correction with the extended Doppler inputs reduced the full-grid maximum luminosity error from 5.484% to 0.803%. The final RMS luminosity error was 0.320%, the surface cooling was 3.24%, and the bottom Rosseland depth was 110.7. Adjacent inward temperature decreases fell from 12 to seven. On the same 47 MARCS depths, the temperature RMS difference fell from 171 to 148 K. The MARCS Fortran reader accepted the refitted export.
+
+For that refit, use the extended TiO and CO tables, the original ExoMolOP water and VO tables, the same revised atomic list and stellar parameters, and the following settings:
+
+```sh
+--restart-csv fiducial.csv --steps 7 --stride 120 --workers 6 --upper-knots 56 \
+--jacobian-interval 4 --peak-error-weight 0.65 --outer-heating-weight 0.14 \
+--temperature-smoothness 0.05 --full-grid-correction
+```
+
+The refitted Doppler model's integrated flux was 0.29% below MARCS over the full sampled grid. It was 14.22% lower at 400–700 nm, 10.92% lower at 700–1,000 nm, and 1.82% higher at 1,000–2,500 nm. The improved luminosity closure and temperature RMS therefore coexist with substantial optical-band errors. These measurements refer to the temperature refit before any surface-only correction.
+
+Two surface-only corrections to the Doppler refit lowered its surface temperature from 1,883.3 to 1,868.3 K and reduced surface cooling from 3.24% to 1.11%. The full-grid maximum luminosity error remained 0.803%. A separate, weaker-regularization refit using the original opacities reached 0.857% maximum luminosity error, with nine adjacent inward temperature decreases and 8.96% surface cooling.
