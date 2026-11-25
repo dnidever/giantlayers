@@ -13,7 +13,7 @@ from unittest.mock import patch
 from lte_opacity import C_ANGSTROM_S, LineProfiles, line_opacity, sample_line_opacity
 from marcs_writer import MarcsDocument
 from spherical_heating import (FormalTransfer, angular_geometry, balance_all_layers, correct_temperatures,
-                               shell_energy_budget, solve_wavelength, temperature_direction)
+                               merit_descent, shell_energy_budget, solve_wavelength, temperature_direction)
 from spherical_kernel_loader import CompiledKernel
 from spherical_transfer import disk_rays, surface_fluxes
 
@@ -24,6 +24,18 @@ class TransferChecks(unittest.TestCase):
         strong, weak = temperature_direction([[10.0, 0.0], [0.0, 0.001]], [-0.2, 0.2])
         self.assertAlmostEqual(strong, 0.02, places=6)
         self.assertAlmostEqual(weak, -0.03, places=6)
+
+    def test_fallback_descends_the_line_search_merit(self):
+        residual = [.2, -.3, .1]
+        columns = [[1., .4, 0.], [0., 1., -2.]]
+        weight = .8
+        direction = merit_descent(columns, residual, 2, weight)
+        shifted = [r+sum(d*c[i] for d, c in zip(direction, columns))
+                   for i, r in enumerate(residual)]
+        def merit(values):
+            return math.sqrt(sum(x*x for x in values)/2)+weight*max(map(abs, values))
+        self.assertLess(merit(shifted), merit(residual))
+        self.assertLessEqual(max(map(abs, direction)), .01)
 
     def test_direct_scattering_matches_converged_iteration(self):
         rays = angular_geometry((10.0, 9.9, 9.8, 9.7), 12)

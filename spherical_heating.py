@@ -446,6 +446,19 @@ def temperature_direction(columns, residual):
     return direction
 
 
+def merit_descent(columns, residual, layer_count, peak_weight):
+    """Find a fallback direction using the line search's own objective."""
+    norm = math.sqrt(math.fsum(x*x for x in residual)*layer_count)
+    if not norm:
+        return [0.0]*len(columns)
+    peak = max(range(len(residual)), key=lambda i: abs(residual[i]))
+    derivative = [x/norm for x in residual]
+    derivative[peak] += math.copysign(peak_weight, residual[peak])
+    gradient = [math.fsum(a*b for a, b in zip(column, derivative)) for column in columns]
+    scale = max(map(abs, gradient))
+    return [-0.01*x/scale for x in gradient] if scale else gradient
+
+
 def update_columns(columns, step, previous, current):
     """Update the finite-difference Jacobian to satisfy the accepted secant."""
     square = math.fsum(x*x for x in step)
@@ -598,8 +611,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
             columns.append([(b-a)/delta for a, b in zip(residual, trial_residual)])
         return columns
 
-    def line_search(columns):
-        direction = temperature_direction(columns, residual)
+    def line_search(direction):
         if not any(direction):
             return None
         previous_merit = merit(residual)
@@ -622,10 +634,12 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         fresh = columns is None or step % jacobian_interval == 0
         if fresh:
             columns = finite_difference()
-        accepted = line_search(columns)
+        accepted = line_search(temperature_direction(columns, residual))
         if accepted is None and not fresh:
             columns = finite_difference()
-            accepted = line_search(columns)
+            accepted = line_search(temperature_direction(columns, residual))
+        if accepted is None:
+            accepted = line_search(merit_descent(columns, residual, len(baseline), peak_weight))
         if accepted is None:
             break
         candidate, (current, result, flux_residual, _), next_residual = accepted
