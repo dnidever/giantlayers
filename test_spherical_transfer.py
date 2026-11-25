@@ -216,12 +216,16 @@ class TransferChecks(unittest.TestCase):
             corrected, _, history, knots, start = balance_all_layers(
                 model, (), (), {}, upper_knots=2, progress=lambda step, metrics: progress.append((step, metrics))
             )
+            with patch("spherical_heating.temperature_direction", return_value=[-.01]*5):
+                _, _, fallback_history, _, _ = balance_all_layers(model, (), (), {}, upper_knots=2)
 
         self.assertEqual(start, 5)
         self.assertEqual(knots, (0, 4, 5, 6, 7))
         self.assertEqual(len(history), 2)
         self.assertEqual(progress, list(enumerate(history)))
         self.assertLess(history[-1][1], 1e-8)
+        self.assertEqual(len(fallback_history), 2)
+        self.assertLess(fallback_history[-1][0], fallback_history[0][0])
         for row, initial in zip(corrected.structure, rows):
             self.assertAlmostEqual(row[3], 1.01*initial[3], places=5)
 
