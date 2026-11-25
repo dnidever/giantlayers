@@ -314,3 +314,13 @@ With `--photospheric-anchor`, GiantLayers integrates the native Rosseland opacit
 The native CSV also contains the radiative acceleration from the frequency integral of flux times mass extinction divided by the speed of light. With `--radiative-force`, GiantLayers subtracts that acceleration from gravity when it updates gas pressure and the mixing-length pressure scale. The solver requires positive effective gravity on the mass grid. By default, the acceleration is reported and hydrostatic balance uses gravity alone.
 
 The optional boundary updates use the latest solved profile between wavelength stages. After the final wavelength stage, GiantLayers iterates the boundary and hydrostatic structure at fixed temperature and reports the resulting luminosity error.
+
+### Check depth resolution and compare with a reference
+
+Use `--restart-csv` with `--interpolate-restart` to move a solved temperature profile to a different number of layers. The previous mass grid must cover the new one. GiantLayers recomputes the gas structure and transfer on the new grid. The solver reports how many final layers used molecular cross sections clamped to the edge of their temperature or pressure axes.
+
+Compare the exported model with a published model at the same stellar parameters. The comparison interpolates only over the shared Rosseland depth range and reports the temperature difference in kelvin and the pressure differences in dex.
+
+```sh
+python3 -m compare_atmospheres published.mod.gz trial.mod.gz > structure-comparison.csv
+```

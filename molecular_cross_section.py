@@ -55,6 +55,16 @@ class MolecularCrossSection:
             for wavelength in wavelengths
         )
 
+    def clamped_layers(self, structure):
+        """Count layers where cross-section interpolation clamps to an axis edge."""
+        cold = hot = low = high = 0
+        for row in structure:
+            cold += row[3] < self.temperatures[0]
+            hot += row[3] > self.temperatures[-1]
+            low += row[5] < self.pressures[0]
+            high += row[5] > self.pressures[-1]
+        return cold, hot, low, high
+
     def mass_opacity(self, gas, pressure, grid):
         """Return molecular absorption on the requested grid in cm²/g."""
         density = gas.number_densities.get(self.species)

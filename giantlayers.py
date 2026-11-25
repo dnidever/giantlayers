@@ -1,6 +1,7 @@
 """Compute a spherical LTE atmosphere from stellar parameters and opacity data."""
 
 import argparse
+from bisect import bisect_right
 import csv
 from dataclasses import replace
 import json
@@ -91,7 +92,7 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
     return MarcsDocument(header, tuple(vector), structure, thermo, ()), boundary
 
 
-def restart_temperatures(seed, path):
+def restart_temperatures(seed, path, interpolate=False):
     """Resume from CSV temperatures on the same radial column-mass grid."""
     with path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
@@ -99,13 +100,32 @@ def restart_temperatures(seed, path):
         if not required <= set(reader.fieldnames or ()):
             raise ValueError("Restart CSV requires layer, column mass, and temperature columns")
         rows = list(reader)
-    if len(rows) != len(seed.structure) or any(
-        int(row["layer"]) != index or not math.isclose(float(row["column_mass_g_cm2"]), thermo[-1], rel_tol=1e-9)
-        for index, (row, thermo) in enumerate(zip(rows, seed.thermodynamics), 1)
+    mass = [float(row["column_mass_g_cm2"]) for row in rows]
+    temp = [float(row["temperature_K"]) for row in rows]
+    if (len(rows) < 2 or any(int(row["layer"]) != i for i, row in enumerate(rows, 1))
+            or any(not math.isfinite(m) or m < 0 for m in mass)
+            or any(a >= b for a, b in zip(mass, mass[1:]))
+            or any(not math.isfinite(t) or t <= 0 for t in temp)):
+        raise ValueError("Restart CSV must give finite temperatures on an increasing radial column-mass grid")
+    target = [row[-1] for row in seed.thermodynamics]
+    if interpolate:
+        if ((target[0] < mass[0] and not math.isclose(target[0], mass[0], abs_tol=1e-9))
+                or (target[-1] > mass[-1] and not math.isclose(target[-1], mass[-1], rel_tol=1e-9))):
+            raise ValueError("The restart must cover the entire requested radial column-mass grid")
+        scale = target[-1]/140
+        axis = [math.log1p(x/scale) for x in mass]
+        log_temp = list(map(math.log, temp))
+        temp = []
+        for m in target:
+            x = max(axis[0], min(axis[-1], math.log1p(m/scale)))
+            j = min(bisect_right(axis, x), len(axis)-1)
+            fraction = (x-axis[j-1])/(axis[j]-axis[j-1])
+            temp.append(math.exp(log_temp[j-1] + fraction*(log_temp[j]-log_temp[j-1])))
+    elif len(mass) != len(target) or any(
+        not math.isclose(a, b, rel_tol=1e-9) for a, b in zip(mass, target)
     ):
         raise ValueError("Restart CSV must match the current radial column-mass grid")
-    structure = tuple((*row[:3], float(saved["temperature_K"]), *row[4:])
-                      for row, saved in zip(seed.structure, rows))
+    structure = tuple((*row[:3], t, *row[4:]) for row, t in zip(seed.structure, temp))
     return replace(seed, structure=structure)
 
 
@@ -163,6 +183,8 @@ def main():
                         help="Include normalized optically thin radiative heating in the temperature objective")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
+    parser.add_argument("--interpolate-restart", action="store_true",
+                        help="Interpolate the restart temperatures onto a new mass grid")
     parser.add_argument("--checkpoint-csv", type=Path, help="Save a restart CSV after each accepted correction")
     parser.add_argument("--verify-full", action="store_true",
                         help="Check the final profile at all input wavelengths")
@@ -184,7 +206,11 @@ def main():
             raise ValueError("Refinement strides must decrease at each stage")
         lines = read_lines(args.lines) if args.lines else ()
         tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
-        model = seed = restart_temperatures(seed, args.restart_csv) if args.restart_csv else seed
+        if args.interpolate_restart and not args.restart_csv:
+            raise ValueError("--interpolate-restart requires --restart-csv")
+        if args.restart_csv:
+            seed = restart_temperatures(seed, args.restart_csv, args.interpolate_restart)
+        model = seed
 
         def checkpoint(current, diagnostics):
             write_checkpoint(args.checkpoint_csv, seed, current, diagnostics)
@@ -241,6 +267,12 @@ def main():
         status = "converged" if maximum <= args.flux_tolerance else "unconverged"
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
               f"(maximum error {maximum:.3%})", file=sys.stderr)
+        for table in tables:
+            cold, hot, low, high = table.clamped_layers(model.structure)
+            if any((cold, hot, low, high)):
+                print(f"{table.isotopologue} boundary opacity used in layers outside tabulated "
+                      f"T (cold {cold}, hot {hot}) or P (low {low}, high {high})",
+                      file=sys.stderr)
         if args.output_model:
             document = build_document(model, result, lines, tables, boundary, args.vmic)
             header = (f"{document.header[0]} ({status}, max luminosity error {maximum:.3%})",
