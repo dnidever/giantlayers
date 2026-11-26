@@ -1,14 +1,16 @@
 # GiantLayers
 
-GiantLayers is an experimental spherical LTE stellar atmosphere solver for cool giants. It starts from effective temperature, surface gravity, stellar mass, and an elemental abundance mixture. The solver couples hydrostatic structure, LTE chemistry, wavelength-dependent radiative transfer with continuum scattering, and mixing-length convection. It writes a CSV with the luminosity residual at each layer and can export a MARCS-format model.
+GiantLayers is an experimental spherical LTE stellar atmosphere solver for cool giants. It starts from effective temperature, surface gravity, stellar mass, and an elemental abundance mixture. The solver couples hydrostatic structure, LTE chemistry, wavelength-dependent radiative transfer with continuum scattering, and mixing-length convection. It writes a CSV with the luminosity residual at each layer and can export MARCS, ATLAS9, and ATLAS12 atmosphere files.
 
 ## Install and run
 
-From a repository checkout, install with Python 3.9 or newer.
+GiantLayers requires Python 3.9 or later. Install from a repository checkout with `python -m pip install .` or install a built wheel with `python -m pip install PATH_TO_WHEEL`.
+
+The package includes a small solar-composition example. Run it from any directory after installing.
 
 ```sh
-python3 -m pip install .
-giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+EXAMPLE_DIR=$(python -c "from importlib.resources import files; print(files('giantlayers_examples'))")
+giantlayers "$EXAMPLE_DIR/continuum-wavelengths.dat" "$EXAMPLE_DIR/solar-gs98.json" \
   --teff 3500 --logg 1 --mass 1 --layers 12 --upper-knots 4 \
   --steps 1 --output-model trial.mod > trial.csv
 ```
