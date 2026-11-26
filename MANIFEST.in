@@ -1,6 +1,6 @@
 include LICENSE
 include mkdocs.yml .readthedocs.yaml
 recursive-include tests *.py
-recursive-include docs *.md *.txt
+recursive-include docs *.md *.txt *.svg
 include tools/exomol_doppler.c tools/exomol_doppler.py
 include src/giantlayers/kernel_module.c

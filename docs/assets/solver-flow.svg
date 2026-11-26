@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="585" viewBox="0 0 660 585" role="img" aria-labelledby="title desc">
+  <title id="title">GiantLayers atmosphere solver</title>
+  <desc id="desc">Stellar inputs lead to an initial profile. The solver computes structure and chemistry, solves energy transport, and checks luminosity balance. When another iteration is needed, it updates the temperatures and repeats. The final pass reports convergence and writes outputs.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#315674"/>
+    </marker>
+  </defs>
+  <rect width="660" height="585" rx="14" fill="#f4f8fb"/>
+  <g fill="#fff" stroke="#7397b0" stroke-width="1.5">
+    <rect x="34" y="24" width="395" height="64" rx="9"/>
+    <rect x="34" y="112" width="395" height="64" rx="9"/>
+    <rect x="34" y="200" width="395" height="64" rx="9"/>
+    <rect x="34" y="288" width="395" height="64" rx="9"/>
+    <rect x="34" y="376" width="395" height="64" rx="9"/>
+    <rect x="34" y="495" width="395" height="64" rx="9"/>
+    <rect x="468" y="288" width="164" height="64" rx="9"/>
+  </g>
+  <g fill="none" stroke="#315674" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M231 88V110"/>
+    <path d="M231 176V198"/>
+    <path d="M231 264V286"/>
+    <path d="M231 352V374"/>
+    <path d="M231 440V493"/>
+    <path d="M429 408H550V354"/>
+    <path d="M550 288V232H431"/>
+  </g>
+  <g font-family="system-ui, sans-serif" text-anchor="middle" fill="#123047" font-size="20" font-weight="700">
+    <text x="231" y="51">Inputs</text>
+    <text x="231" y="139">Initial atmosphere</text>
+    <text x="231" y="227">Structure and LTE chemistry</text>
+    <text x="231" y="315">Spherical energy transport</text>
+    <text x="231" y="403">Check luminosity by layer</text>
+    <text x="231" y="522">Verify and export</text>
+    <text x="550" y="315">Adjust</text>
+    <text x="550" y="338">temperatures</text>
+  </g>
+  <g font-family="system-ui, sans-serif" text-anchor="middle" fill="#304f65" font-size="15">
+    <text x="231" y="73">Stellar parameters, abundances, and opacity data</text>
+    <text x="231" y="161">Depth grid and starting temperatures</text>
+    <text x="231" y="249">Pressure, radius, density, and species populations</text>
+    <text x="231" y="337">Opacity, radiation, and convection</text>
+    <text x="231" y="425">Compare computed and target luminosity</text>
+    <text x="231" y="544">Convergence status, diagnostics, and model files</text>
+    <text x="529" y="430">More iterations</text>
+    <text x="244" y="470" text-anchor="start">Converged or stopping limit reached</text>
+  </g>
+</svg>

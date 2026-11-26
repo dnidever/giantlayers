@@ -7,6 +7,7 @@ theme:
 strict: true
 nav:
   - Overview: index.md
+  - How GiantLayers works: how-it-works.md
   - Quickstart: quickstart.md
   - Spherical model: spherical.md
   - Validation: validation.md
