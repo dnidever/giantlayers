@@ -3,15 +3,20 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+#if defined(_WIN32) && defined(GIANTLAYERS_EXTENSION)
+#define KERNEL_EXPORT __declspec(dllexport)
+#else
+#define KERNEL_EXPORT
+#endif
+
 static void moments(int n, int rays, const int *offset, const int *core,
                     const double *transmit, const double *start, const double *end,
                     const double *bottom, const double *jw, const double *fw,
-                    const double *source, double *mean, double *flux) {
+                    const double *source, double *mean, double *flux, double *incoming) {
     for (int i = 0; i < n; ++i) {
         mean[i] = 0.0;
         if (flux) flux[i] = 0.0;
     }
-    double incoming[n];
     for (int ray = 0; ray < rays; ++ray) {
         int base = offset[ray], last = offset[ray + 1] - base - 1;
         incoming[0] = 0.0;
@@ -33,17 +38,19 @@ static void moments(int n, int rays, const int *offset, const int *core,
 static int direct_scattering(int n, int rays, const int *offset, const int *core,
                              const double *transmit, const double *start, const double *end,
                              const double *bottom, const double *jw, const double *fw,
-                             const double *thermal, const double *fraction, double *source) {
-    double rhs[n], background[n], basis[n], response[n];
-    double (*matrix)[n] = malloc((size_t)n * sizeof(*matrix));
+                             const double *thermal, const double *fraction, double *source,
+                             double *incoming) {
+    double *matrix = malloc(((size_t)n + 4) * n * sizeof(*matrix));
     if (!matrix) return -2;
+    double *rhs = matrix + (size_t)n*n;
+    double *background = rhs+n, *basis = background+n, *response = basis+n;
     for (int i = 0; i < n; ++i) basis[i] = 0.0;
-    moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, background, NULL);
+    moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, background, NULL, incoming);
     for (int column = 0; column < n; ++column) {
         basis[column] = 1.0;
-        moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, response, NULL);
+        moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, basis, response, NULL, incoming);
         for (int row = 0; row < n; ++row)
-            matrix[row][column] = (row == column) - fraction[row]*(response[row]-background[row]);
+            matrix[(size_t)row*n+column] = (row == column) - fraction[row]*(response[row]-background[row]);
         basis[column] = 0.0;
     }
     for (int i = 0; i < n; ++i)
@@ -52,8 +59,8 @@ static int direct_scattering(int n, int rays, const int *offset, const int *core
     for (int i = 0; i < n; ++i) {
         int pivot = i;
         for (int row = i+1; row < n; ++row)
-            if (fabs(matrix[row][i]) > fabs(matrix[pivot][i])) pivot = row;
-        if (fabs(matrix[pivot][i]) < 1e-15) {
+            if (fabs(matrix[(size_t)row*n+i]) > fabs(matrix[(size_t)pivot*n+i])) pivot = row;
+        if (fabs(matrix[(size_t)pivot*n+i]) < 1e-15) {
             free(matrix);
             return -1;
         }
@@ -62,37 +69,38 @@ static int direct_scattering(int n, int rays, const int *offset, const int *core
             rhs[i] = rhs[pivot];
             rhs[pivot] = swap;
             for (int j = i; j < n; ++j) {
-                swap = matrix[i][j];
-                matrix[i][j] = matrix[pivot][j];
-                matrix[pivot][j] = swap;
+                swap = matrix[(size_t)i*n+j];
+                matrix[(size_t)i*n+j] = matrix[(size_t)pivot*n+j];
+                matrix[(size_t)pivot*n+j] = swap;
             }
         }
         for (int row = i+1; row < n; ++row) {
-            double factor = matrix[row][i]/matrix[i][i];
+            double factor = matrix[(size_t)row*n+i]/matrix[(size_t)i*n+i];
             rhs[row] -= factor*rhs[i];
             for (int j = i+1; j < n; ++j)
-                matrix[row][j] -= factor*matrix[i][j];
+                matrix[(size_t)row*n+j] -= factor*matrix[(size_t)i*n+j];
         }
     }
     for (int i = n-1; i >= 0; --i) {
         double value = rhs[i];
-        for (int j = i+1; j < n; ++j) value -= matrix[i][j]*source[j];
-        source[i] = value/matrix[i][i];
+        for (int j = i+1; j < n; ++j) value -= matrix[(size_t)i*n+j]*source[j];
+        source[i] = value/matrix[(size_t)i*n+i];
     }
     free(matrix);
     return 0;
 }
 
-int spherical_solve(int n, int rays, const int *offset, const int *core,
+KERNEL_EXPORT int spherical_solve(int n, int rays, const int *offset, const int *core,
                     const double *scale, const double *mu_bottom,
                     const double *jw, const double *fw, const double *radial,
                     const double *thermal, const double *absorption, const double *scattering,
                     double tolerance, int max_iterations, double *mean, double *flux, double *heating) {
     int entries = offset[rays];
-    double *buffers = malloc((3*(size_t)entries + (size_t)rays) * sizeof(*buffers));
+    double *buffers = malloc((3*(size_t)entries + (size_t)rays + 5*(size_t)n) * sizeof(*buffers));
     if (!buffers) return -2;
     double *transmit = buffers, *start = transmit+entries, *end = start+entries, *bottom = end+entries;
-    double diagonal[n], source[n], fraction[n], updated[n];
+    double *diagonal = bottom+rays, *source = diagonal+n, *fraction = source+n;
+    double *updated = fraction+n, *incoming = updated+n;
     double peak = 0.0;
     int has_scattering = 0;
     for (int i = 0; i < n; ++i) {
@@ -142,7 +150,7 @@ int spherical_solve(int n, int rays, const int *offset, const int *core,
     int iterations = 0;
     if (has_scattering && peak > 0) {
         for (iterations = 1; iterations <= max_iterations; ++iterations) {
-            moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, source, mean, NULL);
+            moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, source, mean, NULL, incoming);
             double error = 0.0;
             for (int i = 0; i < n; ++i) {
                 double w = fraction[i];
@@ -155,7 +163,7 @@ int spherical_solve(int n, int rays, const int *offset, const int *core,
         }
         if (iterations > max_iterations) {
             int status = direct_scattering(n, rays, offset, core, transmit, start, end, bottom,
-                                           jw, fw, thermal, fraction, source);
+                                           jw, fw, thermal, fraction, source, incoming);
             if (status < 0) {
                 free(buffers);
                 return status;
@@ -163,7 +171,7 @@ int spherical_solve(int n, int rays, const int *offset, const int *core,
             iterations = max_iterations;
         }
     }
-    moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, source, mean, flux);
+    moments(n, rays, offset, core, transmit, start, end, bottom, jw, fw, source, mean, flux, incoming);
     for (int i = 0; i < n; ++i)
         heating[i] = 12.56637061435917295385*absorption[i]*(mean[i]-thermal[i]);
     free(buffers);

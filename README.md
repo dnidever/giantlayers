@@ -6,6 +6,8 @@ GiantLayers is an experimental spherical LTE stellar atmosphere solver for cool 
 
 GiantLayers requires Python 3.9 or later. Install from a repository checkout with `python -m pip install .` or install a built wheel with `python -m pip install PATH_TO_WHEEL`.
 
+Binary wheels use the included C transfer kernel automatically, with no compiler required to install or run the wheel. Use `--python-kernel` to select Python transfer or `--kernel PATH` for a custom shared library. On platforms without a matching binary wheel, pip can install the universal wheel and GiantLayers uses Python transfer.
+
 The package includes a small solar-composition example. Run it from any directory after installing.
 
 ```sh

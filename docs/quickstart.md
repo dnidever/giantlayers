@@ -210,6 +210,8 @@ Add `--luminosity-target` to fit the MARCS surface luminosity alongside the oute
 
 With a coarse startup stride, `--verify-full` reevaluates the accepted profile on every input wavelength and writes the full-grid diagnostics. The verification holds the accepted temperatures fixed. For larger runs, the optional C99 kernel accelerates the ray solve while chemistry and opacity remain in Python.
 
+The main `giantlayers` command automatically uses the C kernel when installed from a binary wheel. The commands below compile a custom library from a source checkout for the heating diagnostic, which takes an explicit `--kernel` path.
+
 ```sh
 cc -O3 -std=c99 -shared -fPIC src/giantlayers/spherical_kernel.c -o spherical_kernel.so -lm
 python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 400 --adjust-layers 3 --steps 5 --luminosity-target --verify-full --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > luminosity-check.csv

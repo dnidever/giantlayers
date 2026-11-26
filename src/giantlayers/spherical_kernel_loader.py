@@ -1,7 +1,14 @@
 """Optional ctypes interface to the standard-C spherical wavelength kernel."""
 
 import ctypes as ct
+from importlib.util import find_spec
 from pathlib import Path
+
+
+def bundled_kernel_path():
+    """Return the installed native library path if the package includes one."""
+    spec = find_spec("._spherical_kernel", __package__)
+    return Path(spec.origin) if spec is not None and spec.origin is not None else None
 
 
 class ScatteringIterationLimit(RuntimeError):

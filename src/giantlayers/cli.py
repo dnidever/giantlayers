@@ -23,6 +23,7 @@ from .native_transfer import read_wavelengths
 from .spherical_heating import (balance_all_layers, calibrate_heating, evaluate, evaluate_parallel,
                                report_balance_step, surface_equilibrium_temperature, total_flux_budget,
                                write_balance_csv)
+from .spherical_kernel_loader import bundled_kernel_path
 from .spherical_hydrostatic import HydrostaticBoundary, SOLAR_MASS, reconstruct_for_transfer
 
 from .transfer_cache import input_fingerprint, read_residuals, transfer_key, write_residuals
@@ -199,7 +200,10 @@ def main():
                         help="Weight of the maximum error in the temperature step acceptance criterion")
     parser.add_argument("--jacobian-interval", type=int, default=3,
                         help="Steps between finite-difference Jacobian refreshes")
-    parser.add_argument("--kernel", type=Path, help="Optional compiled spherical transfer library")
+    backend = parser.add_mutually_exclusive_group()
+    backend.add_argument("--kernel", type=Path, help="Use a custom compiled spherical transfer library")
+    backend.add_argument("--python-kernel", action="store_true",
+                         help="Use Python transfer even when the compiled kernel is installed")
     parser.add_argument("--workers", type=int, default=1,
                         help="Process count for Jacobian perturbations and fixed-profile transfer")
     parser.add_argument("--flux-tolerance", type=float, default=0.01,
@@ -242,6 +246,8 @@ def main():
     parser.add_argument("--radiative-force", action="store_true",
                         help="Include radiative acceleration in the hydrostatic pressure balance")
     args = parser.parse_args()
+    if args.kernel is None and not args.python_kernel:
+        args.kernel = bundled_kernel_path()
     try:
         if not math.isfinite(args.temperature_smoothness) or args.temperature_smoothness < 0:
             raise ValueError("Temperature smoothness weight must be finite and nonnegative")
@@ -364,6 +370,8 @@ def main():
                 last_full_transfer = transfer
             return transfer
 
+        backend_name = "compiled" if args.kernel else "Python"
+        print(f"Transfer kernel: {backend_name}", file=sys.stderr)
         update_structure = args.photospheric_anchor or args.radiative_force
         for index, (stride, line_scale) in enumerate(stages, 1):
             wavelengths = nested_wavelengths(reference, stride)
