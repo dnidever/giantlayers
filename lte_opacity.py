@@ -27,6 +27,10 @@ class Line:
     lower_energy: float
     log_gf: float
     damping_s: float = 0.0
+    electron_damping_cm3_s: float = 0.0
+    neutral_h_damping_cm3_s: float = 0.0
+    electron_damping_exponent: float = 0.0
+    neutral_h_damping_exponent: float = 0.0
 
 
 class LineProfiles:
@@ -58,7 +62,7 @@ class LineProfiles:
 
 
 def read_lines(path):
-    """Read vacuum Å, lower excitation in eV and optional damping in s⁻¹."""
+    """Read transitions and optional radiative and collisional damping parameters."""
     with open(path, newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream)
         required = {"wavelength_vacuum_A", "species", "lower_energy_eV", "log_gf"}
@@ -68,10 +72,17 @@ def read_lines(path):
         for row in reader:
             line = Line(float(row["wavelength_vacuum_A"]), row["species"].strip(),
                         float(row["lower_energy_eV"]), float(row["log_gf"]),
-                        float(row.get("damping_s") or 0))
+                        float(row.get("damping_s") or 0),
+                        float(row.get("electron_damping_cm3_s") or 0),
+                        float(row.get("neutral_h_damping_cm3_s") or 0),
+                        float(row.get("electron_damping_exponent") or 0),
+                        float(row.get("neutral_h_damping_exponent") or 0))
             if (not all(math.isfinite(x) for x in (line.wavelength, line.lower_energy,
-                                                   line.log_gf, line.damping_s))
-                    or line.wavelength <= 0 or min(line.lower_energy, line.damping_s) < 0):
+                                                   line.log_gf, line.damping_s, line.electron_damping_cm3_s,
+                                                   line.neutral_h_damping_cm3_s, line.electron_damping_exponent,
+                                                   line.neutral_h_damping_exponent))
+                    or line.wavelength <= 0 or min(line.lower_energy, line.damping_s,
+                                                   line.electron_damping_cm3_s, line.neutral_h_damping_cm3_s) < 0):
                 raise ValueError(f"Invalid transition on line {reader.line_num}")
             result.append(line)
     return result
@@ -139,7 +150,15 @@ def profile_parameters(line, gas, vmic):
     thermal = 2 * K_EV * gas.temperature * 1.602176634e-12 / (gas.masses_amu[line.species] * AMU)
     doppler = center / LIGHT * math.sqrt(thermal + (vmic * 1e5)**2)
     gaussian_width = 2 * math.sqrt(math.log(2)) * doppler
-    lorentz_width = line.damping_s / (2 * math.pi)
+    damping = line.damping_s
+    scaled_temperature = gas.temperature / 10000.0
+    if line.electron_damping_cm3_s:
+        damping += (line.electron_damping_cm3_s * gas.electron_density
+                    * scaled_temperature**line.electron_damping_exponent)
+    if line.neutral_h_damping_cm3_s:
+        damping += (line.neutral_h_damping_cm3_s * gas.number_densities["H"]
+                    * scaled_temperature**line.neutral_h_damping_exponent)
+    lorentz_width = damping / (2 * math.pi)
     # Thompson–Cox–Hastings normalized pseudo-Voigt approximation.
     g, l = gaussian_width, lorentz_width
     width = (g**5 + 2.69269*g**4*l + 2.42843*g**3*l*l + 4.47163*g*g*l**3

@@ -210,6 +210,8 @@ def main():
                         help="Exit with status 2 if the computed bottom Rosseland depth is smaller")
     parser.add_argument("--outer-heating-weight", type=float, default=0.0,
                         help="Include normalized optically thin radiative heating in the temperature objective")
+    parser.add_argument("--heating-transition-tau", type=float,
+                        help="Experimental local radiative balance above this depth and flux balance below it")
     parser.add_argument("--bracket-bottom-flux", action="store_true",
                         help="Stabilize the deepest luminosity residual with a bounded temperature correction")
     parser.add_argument("--bracket-deep-layers", type=int, default=1,
@@ -247,6 +249,11 @@ def main():
             raise ValueError("Use at least one worker and a fractional flux tolerance between zero and one")
         if args.equilibrate_surface < 0:
             raise ValueError("Use a nonnegative number of surface correction passes")
+        if args.heating_transition_tau is not None and (
+            not math.isfinite(args.heating_transition_tau)
+            or args.heating_transition_tau <= 0 or args.outer_heating_weight
+        ):
+            raise ValueError("--heating-transition-tau requires a positive depth and no --outer-heating-weight")
         if args.atlas_format == "atlas12":
             if not args.output_atlas:
                 raise ValueError("--atlas-format atlas12 requires --output-atlas")
@@ -383,7 +390,7 @@ def main():
                     print("Reused verified full-grid calibration", file=sys.stderr, flush=True)
                 sampled = total_flux_budget(model, sampled_transfer, True)
                 flux_offset = tuple(exact-row[-1] for row, exact in zip(sampled, exact_flux))
-                if args.outer_heating_weight:
+                if args.outer_heating_weight or args.heating_transition_tau is not None:
                     heating_scale, heating_offset = calibrate_heating(sampled_transfer[8], exact_heating)
                     print(f"Full-grid starting surface net heating / LTE emission "
                           f"{exact_heating[0]:+.3%}", file=sys.stderr, flush=True)
@@ -402,6 +409,7 @@ def main():
                     upper_knots=args.upper_knots, boundary=boundary, progress=report_balance_step,
                     flux_tolerance=args.flux_tolerance, jacobian_interval=args.jacobian_interval,
                     outer_heating_weight=args.outer_heating_weight,
+                    heating_transition_tau=args.heating_transition_tau,
                     on_accept=checkpoint if args.checkpoint_csv else None,
                     adaptive_knots=args.adaptive_knots, peak_weight=args.peak_error_weight,
                     line_scale=line_scale, jacobian_workers=args.workers,
@@ -496,7 +504,14 @@ def main():
         print(f"Luminosity balance {status} at {args.flux_tolerance:.3%} tolerance "
               f"(maximum error {maximum:.3%})", file=sys.stderr)
         print(f"Surface net heating / LTE emission {result[8][0]:+.3%}", file=sys.stderr)
-        bottom_tau = rosseland_depth(model, boundary, result)[-1]
+        final_depth = rosseland_depth(model, boundary, result)
+        bottom_tau = final_depth[-1]
+        if args.heating_transition_tau is not None:
+            thin_heating = [abs(q) for tau, q in zip(final_depth, result[8])
+                            if tau < args.heating_transition_tau]
+            if thin_heating:
+                print(f"Peak optically thin net heating / LTE emission {max(thin_heating):.3%} "
+                      f"({len(thin_heating)} layers)", file=sys.stderr)
         print(f"Bottom Rosseland optical depth {bottom_tau:.6g}", file=sys.stderr)
         shallow = minimum_tau is not None and bottom_tau < minimum_tau
         if shallow:

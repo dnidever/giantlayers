@@ -1,5 +1,6 @@
 """Independent initialization, equilibrium, and export checks."""
 
+from dataclasses import replace
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,7 +12,7 @@ from collision_induced import HitranCIA
 from giantlayers import initialize, restart_temperatures
 from hminus import K_B, K_EV
 from lte_chemistry import AMU, Thermochemistry
-from lte_opacity import C_ANGSTROM_S, H_EV_S, rayleigh_cross_sections
+from lte_opacity import C_ANGSTROM_S, H_EV_S, profile_parameters, rayleigh_cross_sections, read_lines
 from marcs_writer import read_document, write_document
 from native_marcs import build_document
 from spherical_heating import (
@@ -23,6 +24,22 @@ from spherical_hydrostatic import reconstruct_for_transfer
 
 
 class NativeAtmosphereChecks(unittest.TestCase):
+    def test_collisional_damping_matches_lorentz_rate_at_layer_conditions(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory)/"lines.csv"
+            path.write_text(
+                "wavelength_vacuum_A,species,lower_energy_eV,log_gf,damping_s,"
+                "electron_damping_cm3_s,neutral_h_damping_cm3_s,neutral_h_damping_exponent\n"
+                "5000,Fe,1,-1,1e7,2e-6,3e-8,0.3\n"
+                "5000,Fe,1,-1\n"
+            )
+            broadened, doppler = read_lines(path)
+        gas = Thermochemistry().solve(3500, 100, {"H": 12, "Fe": 7.5})
+        rate = 1e7 + 2e-6*gas.electron_density + 3e-8*gas.number_densities["H"]*.35**.3
+        self.assertEqual(profile_parameters(broadened, gas, 2),
+                         profile_parameters(replace(doppler, damping_s=rate), gas, 2))
+        self.assertGreater(profile_parameters(broadened, gas, 2)[2], 0)
+
     def test_temperature_curvature_accounts_for_nonuniform_layer_spacing(self):
         axis = (0, 0.1, 1)
         linear = [(0, 0, 0, math.exp(8 + 0.2*x)) for x in axis]

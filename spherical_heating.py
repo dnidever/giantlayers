@@ -20,6 +20,7 @@ from lte_opacity import H_EV_S, LIGHT, layer_opacities, prepare_layers, read_lin
 from mixing_length import evaluate as evaluate_convection
 from marcs_writer import read_document
 from molecular_cross_section import MolecularCrossSection
+from native_marcs import rosseland_depth
 from native_transfer import read_wavelengths, reference_flux_budget, spectral_quadrature
 from odf_transfer import planck_nu
 from spherical_hydrostatic import boundary_from_marcs, increments, integrate, reconstruct_for_transfer
@@ -702,7 +703,7 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
                        on_accept=None, adaptive_knots=0, peak_weight=0.25, line_scale=1.0,
                        jacobian_workers=1, flux_offset=(), heating_offset=(), heating_scale=(),
                        temperature_smoothness=0.0, bracket_bottom_flux=False, bracket_deep_layers=1,
-                       adaptive_jacobian=False, jacobian_progress=None):
+                       adaptive_jacobian=False, jacobian_progress=None, heating_transition_tau=None):
     """Fit absolute total luminosity across the entire hydrostatic structure."""
     if steps < 0 or upper_knots < 2:
         raise ValueError("Use a nonnegative step count and at least two upper temperature knots")
@@ -712,6 +713,10 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
         raise ValueError("Jacobian interval must be at least one")
     if not math.isfinite(outer_heating_weight) or outer_heating_weight < 0:
         raise ValueError("Outer heating weight must be finite and nonnegative")
+    if heating_transition_tau is not None and (
+        not math.isfinite(heating_transition_tau) or heating_transition_tau <= 0 or outer_heating_weight
+    ):
+        raise ValueError("Use a positive heating transition depth without an outer heating weight")
     if not math.isfinite(temperature_smoothness) or temperature_smoothness < 0:
         raise ValueError("Temperature smoothness weight must be finite and nonnegative")
     if adaptive_knots < 0 or not math.isfinite(peak_weight) or peak_weight < 0:
@@ -755,6 +760,13 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
 
     current, result, flux_residual, convection = evaluate_trial(model)
     heating_weights = []
+    thin = ()
+    if heating_transition_tau is not None:
+        # Freeze the partition within this fit so finite differences see
+        # the same equations as the unperturbed trial.
+        thin = tuple(tau < heating_transition_tau for tau in rosseland_depth(current, boundary, result))
+        if all(thin):
+            raise ValueError("The heating transition must leave at least one flux-balance layer")
     if outer_heating_weight:
         rosseland = [row[4] for row in result[7]]
         depths = integrate(increments(boundary.column_mass, rosseland), 0.0)
@@ -762,6 +774,15 @@ def balance_all_layers(model, wavelengths, lines, composition, steps=1,
 
     def objective(structure, evaluation, errors):
         residuals = list(errors)
+        if thin:
+            residuals = [
+                scale*q+offset if local else error
+                for local, scale, q, offset, error in zip(
+                    thin, heating_scale, evaluation[8], heating_offset, errors
+                )
+            ]
+            if thin[0]:
+                residuals.append(errors[0])
         if heating_weights:
             residuals.extend(w*(scale*q+offset) for w, q, scale, offset in
                              zip(heating_weights, evaluation[8], heating_scale, heating_offset))
