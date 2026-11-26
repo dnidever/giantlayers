@@ -40,4 +40,8 @@ giantlayers flx_wavelengths.vac.gz mixture.json --teff 3500 --logg 1 --mass 1 --
 - Inspect molecular table coverage and compare the result at finer depth and wavelength resolution before using it quantitatively. The full-grid check measures luminosity closure for the supplied opacities. [Validation benchmarks](validation.md)
 - Use `--output-model atmosphere.mod` for MARCS, `--output-atlas atmosphere.dat` for ATLAS9, or add `--atlas-format atlas12` for ATLAS12. You can request MARCS and ATLAS output in the same run. [Export options and format details](advanced.md#control-sampling-restarts-and-export)
 
+## Plot the atmosphere
+
+The development version can save the final temperature, gas and electron pressure, density, and luminosity residual profiles versus Rosseland optical depth. Install the plotting extra from a repository checkout with `python -m pip install '.[plot]'`, then add `--output-plot profiles.png` to your run. Use a `.pdf` or `.svg` filename for vector output. The plot shows the convergence status and the luminosity tolerance band.
+
 [How GiantLayers works](how-it-works.md) · [Advanced usage](advanced.md)

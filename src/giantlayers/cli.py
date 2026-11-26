@@ -3,6 +3,7 @@
 import argparse
 from bisect import bisect_right
 import csv
+from importlib import import_module
 from dataclasses import replace
 import json
 import math
@@ -20,6 +21,7 @@ from .marcs_writer import MarcsDocument, write_document
 from .molecular_cross_section import MolecularCrossSection
 from .native_marcs import build_document, photospheric_anchor, rosseland_depth
 from .native_transfer import read_wavelengths
+from .profile_plot import PLOT_FORMATS, write_profile_plot
 from .spherical_heating import (balance_all_layers, calibrate_heating, evaluate, evaluate_parallel,
                                report_balance_step, surface_equilibrium_temperature, total_flux_budget,
                                write_balance_csv)
@@ -227,6 +229,7 @@ def main():
                         help="Format for --output-atlas (default: atlas9)")
     parser.add_argument("--output-model", type=Path, help="Write a MARCS-format .mod or .mod.gz record")
     parser.add_argument("--output-spectrum", type=Path, help="Write the emergent spectrum on the final grid")
+    parser.add_argument("--output-plot", type=Path, help="Write final atmosphere profiles as PNG, PDF, or SVG")
     parser.add_argument("--restart-csv", type=Path, help="Start from temperatures on the same mass grid")
     parser.add_argument("--interpolate-restart", action="store_true",
                         help="Interpolate the restart temperatures onto a new mass grid")
@@ -271,6 +274,19 @@ def main():
                         *args.molecular_cross_section, *args.cia)
             if args.output_atlas.resolve() in {path.resolve() for path in reserved if path is not None}:
                 raise ValueError("The ATLAS export must use a separate file")
+        if args.output_plot:
+            if args.output_plot.suffix.lower() not in PLOT_FORMATS:
+                raise ValueError("--output-plot requires a .png, .pdf, or .svg filename")
+            reserved = (args.wavelengths, args.abundances, args.lines, args.kernel, args.restart_csv,
+                        args.checkpoint_csv, args.transfer_cache, args.output_model, args.output_atlas,
+                        args.output_spectrum, *args.molecular_cross_section, *args.cia)
+            if args.output_plot.resolve() in {path.resolve() for path in reserved if path is not None}:
+                raise ValueError("The profile plot must use a separate file")
+            try:
+                import_module("matplotlib.figure")
+            except ImportError as exc:
+                raise ValueError("Profile plotting requires Matplotlib. "
+                                 "Install with python -m pip install --pre 'giantlayers[plot]'") from exc
         omitted = {path.resolve() for path in args.test_omit_hot_opacity}
         if omitted:
             if (args.steps != 0 or args.equilibrate_surface or not args.restart_csv
@@ -546,6 +562,10 @@ def main():
         if args.output_atlas:
             write_atlas(model, result, boundary, args.vmic, args.output_atlas, status=status,
                         atlas12=args.atlas_format == "atlas12")
+        if args.output_plot:
+            write_profile_plot(args.output_plot, model, final_depth, budget,
+                               teff=args.teff, logg=args.logg, status=status,
+                               maximum=maximum, tolerance=args.flux_tolerance)
         return 2 if shallow or (args.require_flux_convergence and maximum > args.flux_tolerance) else 0
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
