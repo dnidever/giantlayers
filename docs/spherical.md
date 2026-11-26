@@ -20,4 +20,4 @@ The temperature solver targets L = 4πr²(F_rad + F_conv) = 4πR²σT_eff⁴ at 
 
 Use the CSV maximum luminosity residual to check convergence at every layer. Surface flux, agreement with a published temperature profile, and a low RMS residual each provide different information. Compare the same model on finer wavelength and depth grids and inspect the molecular table coverage report.
 
-The scientific scope is static, dust-free atmospheres in LTE. The result depends on the supplied opacity inventory and on the pressure and mass endpoints. The MARCS-format export includes an isotropic LTE estimate of radiation pressure and uses zero turbulent pressure. See the [Quickstart](quickstart.md) for the benchmark and export commands.
+The scientific scope is static, dust-free atmospheres in LTE. The result depends on the supplied opacity inventory and on the pressure and mass endpoints. The MARCS-format export includes an isotropic LTE estimate of radiation pressure and uses zero turbulent pressure. See [Validation](validation.md) for the benchmarks and the [Quickstart](quickstart.md) for export commands.

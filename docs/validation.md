@@ -1,17 +1,23 @@
 # Validation
 
+## Benchmark summary
+
+- **Fiducial giant.** A recent free solve at 3,500 K and log g = +1 reached a peak luminosity residual of 0.76% on all 100,724 wavelengths, with a photospheric temperature difference of 53 K RMS from MARCS over log Rosseland depth −2 to +1. The integrated 400–700 nm flux was 9.7% above MARCS. A different starting profile reached a similarly small luminosity residual and a larger temperature difference.
+- **Low-gravity composition tests.** Five oxygen-rich mixtures at 3,500 K and log g = −0.5 reached peak luminosity residuals below 1%. Photospheric temperatures differed from matched MARCS models by 51–74 K RMS. GiantLayers produced a larger temperature response to alpha enhancement and CN processing than MARCS in these tests.
+- **Limits.** The results describe the particular mixtures, opacity tables, and resolutions tested. Check luminosity closure, temperature and pressure structure, and the wavelength bands relevant to your application. The detailed benchmark history below includes earlier opacity inputs and unconverged trials.
+
+
 ## 3,500 K giant
 
 The main reference is the spherical MARCS GS98 giant at 3,500 K, log g = 1, one solar mass, and 2 km/s microturbulence. GiantLayers starts from an analytic temperature profile and independent radial column-mass grid. The reference supplies the comparison structure, abundance pattern, and wavelength axis. [MARCS model downloads](https://marcs.astro.uu.se/data.html) · [MARCS atmosphere methods](https://arxiv.org/abs/0805.0554)
 
-The trial uses a revised MARCS atomic transition subset and ExoMolOP cross sections for TiO, H₂O, VO, and CO. Run the atomic transition converter and the ExoMolOP converter described in the [Quickstart](quickstart.md). The example abundance file supplies the GS98 mixture.
+The trial uses a revised MARCS atomic transition subset and ExoMolOP cross sections for TiO, H₂O, VO, and CO. Run the atomic transition converter and the ExoMolOP converter described in [Advanced usage](advanced.md). Copy the GS98 abundance example using the command in the [Quickstart](quickstart.md#run-the-bundled-example).
 
 ```sh
-cc -O3 -std=c99 -shared -fPIC src/giantlayers/spherical_kernel.c -o giantlayers-transfer.so -lm
-giantlayers flx_wavelengths.vac.gz src/giantlayers/examples/solar-gs98.json \
+giantlayers flx_wavelengths.vac.gz solar-gs98.json \
   --teff 3500 --logg 1 --mass 1 --layers 32 --core-rays 24 \
   --stride 400 --refine-stride 160 --steps 8 --upper-knots 10 \
-  --kernel ./giantlayers-transfer.so --lines revised-atomic-lines.csv \
+  --lines revised-atomic-lines.csv \
   --molecular-cross-section tio.json.gz --molecular-cross-section water.json.gz \
   --molecular-cross-section vo.json.gz --molecular-cross-section co.json.gz \
   --checkpoint-csv checkpoint.csv --output-model trial.mod.gz > trial.csv
@@ -23,9 +29,15 @@ In the first independent 631-point trial, the RMS luminosity error was 5.00% and
 
 A subsequent fit used 1,261 wavelength samples, all 32 temperature controls, and `--full-grid-correction`. The final transfer on all 100,724 samples gave 0.52% RMS luminosity error, 0.863% maximum, −0.25% at the surface, and +0.06% at the innermost layer. The temperature RMS difference from MARCS was 125 K over 55 shared reference layers. This establishes luminosity convergence for that 32-layer calculation. Ten layers used the upper temperature edge of the molecular opacity tables. The 56-layer refinement and the carbon-rich trials require further convergence work.
 
-Compare temperature and pressures over the common optical depths with `python3 -m compare_atmospheres marcs-reference.mod.gz trial.mod.gz`. Confirm that each dataset covers the line-forming layers and check the results on finer depth and angle grids.
+Compare temperature and pressures over the common optical depths with `python -m giantlayers.compare_atmospheres marcs-reference.mod.gz trial.mod.gz`. Confirm that each dataset covers the line-forming layers and check the results on finer depth and angle grids.
 
 ## Analytic and software checks
+
+The gray Eddington atmosphere is an analytic reference for the hydrostatic and transfer calculations. It assumes plane-parallel geometry, constant gravity, and constant absorption opacity. In column mass, the analytic checks are gas pressure *P* = *gm* and radiative flux *F* = σ*T*ₑff⁴ at every depth. The command reports the residuals from the numerical pressure and ray-sweep calculations.
+
+```sh
+python -m giantlayers.gray_atmosphere --teff 4300 --logg 1.5 > gray-benchmark.csv
+```
 
 Run `python -m unittest discover -v`. The tests cover the constant-density hydrostatic sphere, the effect of radiative acceleration, scattering transfer, temperature corrections, chemical pressure and charge conservation, opacity interpolation, restart interpolation, and MARCS-format export.
 
@@ -34,7 +46,7 @@ Run `python -m unittest discover -v`. The tests cover the constant-density hydro
 Hold the stellar inputs, opacity data, wavelength grid, angular quadrature, and boundary options fixed. Solve at two depth resolutions and compare the solver CSVs:
 
 ```sh
-python3 -m audit_resolution coarse.csv fine.csv --require-pass > depth-audit.json
+python -m giantlayers.audit_resolution coarse.csv fine.csv --require-pass > depth-audit.json
 ```
 
 The JSON reports luminosity closure for each calculation and identifies the layer and column mass with its largest error. It also measures the maximum temperature and log gas-pressure differences on the union of the two depth grids over their shared radial column-mass interval. Temperature and log pressure are interpolated linearly in column mass. Choose structure tolerances for the intended science with `--temperature-tolerance` in kelvin and `--pressure-tolerance` in dex. With `--require-pass`, status 2 identifies a failed configured check. Use the CLI and input files to establish that the two CSVs share the intended physical and numerical settings.
@@ -72,7 +84,7 @@ A second heating calibration at stride 40 (2,520 samples) and outer heating weig
 The cool-surface tests extend the same TiO, H₂O, VO, and CO ExoMolOP tables with the published 1,800, 1,900, and 2,000 K slices. The previous 2,200–3,400 K rows, 10–10,000 dyn/cm² pressure points, and native wavelengths are preserved. A local copy of each original TauREx HDF5 file can be converted with:
 
 ```sh
-python3 -m exomol_import input.h5 output.json.gz --species TiO --isotope-fraction 0.7372 \
+python -m giantlayers.exomol_import input.h5 output.json.gz --species TiO --isotope-fraction 0.7372 \
   --temperature-points 1800 1900 2000 2200 2400 2600 2800 3000 3200 3400 \
   --pressure-points 10 100 1000 10000
 ```
@@ -127,7 +139,7 @@ Use `--temperature-smoothness WEIGHT` to add a penalty for short-scale oscillati
 The MARCS GS98 archive contains the `.flx.gz` record for the fiducial atmosphere. Pair it with the published `flx_wavelengths.vac.gz` grid. Run GiantLayers on the complete grid with `--output-spectrum native.csv` and then compare broad wavelength integrals:
 
 ```sh
-python -m compare_marcs_flux native.csv flx_wavelengths.vac.gz fiducial.flx.gz --sampled
+python -m giantlayers.compare_marcs_flux native.csv flx_wavelengths.vac.gz fiducial.flx.gz --sampled
 ```
 
 Use repeatable `--band SHORT_NM LONG_NM` arguments for other ranges. The comparison requires an exact match between the native and MARCS wavelength arrays. These broad-band trapezoidal integrals compare statistical samples of flux per wavelength normalized to each model's reference radius. Line strengths and narrow-band integrals require dedicated spectrum synthesis. [MARCS flux format](https://marcs.astro.uu.se/docs.html)
@@ -165,7 +177,7 @@ At the official MARCS temperatures and gas pressures, median TiO differences for
 Run the fixed-structure check against any complete MARCS atmosphere with:
 
 ```sh
-python -m compare_marcs_chemistry reference.mod.gz --min-log-tau -4 --max-log-tau 1
+python -m giantlayers.compare_marcs_chemistry reference.mod.gz --min-log-tau -4 --max-log-tau 1
 ```
 
 The command uses the official element-by-element abundances, temperatures, and gas pressures. It reports the differences in electron, CO, CN, water, and TiO partial pressures before any atmospheric temperature or density fitting.

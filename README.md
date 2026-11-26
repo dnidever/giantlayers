@@ -4,7 +4,7 @@ GiantLayers is an experimental spherical LTE stellar atmosphere solver for cool 
 
 ## Install and run
 
-GiantLayers requires Python 3.9 or later. Install from a repository checkout with `python -m pip install .` or install a built wheel with `python -m pip install PATH_TO_WHEEL`.
+GiantLayers requires Python 3.9 or later. Install the alpha release from PyPI with `python -m pip install --pre giantlayers`. To install a repository checkout, use `python -m pip install .`.
 
 Binary wheels use the included C transfer kernel automatically, with no compiler required to install or run the wheel. Use `--python-kernel` to select Python transfer or `--kernel PATH` for a custom shared library. On platforms without a matching binary wheel, pip can install the universal wheel and GiantLayers uses Python transfer.
 
@@ -19,7 +19,7 @@ giantlayers "$EXAMPLE_DIR/continuum-wavelengths.dat" "$EXAMPLE_DIR/solar-gs98.js
 
 This continuum-only example exercises the solver and exporter. For a line-blanketed calculation, provide an atomic transition CSV with `--lines` and molecular cross sections with repeatable `--molecular-cross-section` options. The output identifies unconverged profiles. Check the maximum luminosity error and sensitivity to wavelength and depth resolution before using a model.
 
-See the [quickstart](docs/quickstart.md) for input formats, opacity sources, and the optional compiled transfer kernel. The gray Eddington benchmark is available through `python -m giantlayers.gray_atmosphere`. Run the regression tests with `python -m unittest discover`.
+See the [Quickstart](docs/quickstart.md) for installation and export, and [Advanced usage](docs/advanced.md) for opacity preparation and solver diagnostics. The gray Eddington benchmark is available through `python -m giantlayers.gray_atmosphere`. Run the regression tests with `python -m unittest discover`.
 
 ## Documentation
 

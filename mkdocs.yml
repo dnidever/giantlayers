@@ -9,6 +9,6 @@ nav:
   - Overview: index.md
   - How GiantLayers works: how-it-works.md
   - Quickstart: quickstart.md
+  - Advanced usage: advanced.md
   - Spherical model: spherical.md
   - Validation: validation.md
-  - Gray atmosphere model: model.md

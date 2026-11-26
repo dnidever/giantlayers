@@ -3,7 +3,7 @@
 GiantLayers is an experimental stellar atmosphere solver for cool giants. It can start a spherical LTE calculation from stellar parameters, a chemical abundance mixture, and opacity data. It reports luminosity residuals by layer and can export MARCS, ATLAS9, and ATLAS12 atmosphere files.
 
 - [How GiantLayers works](how-it-works.md) follows a model from stellar parameters through the temperature iterations to the output files.
-- [Quickstart](quickstart.md) covers installation, atmosphere calculations, and reference benchmarks.
+- [Quickstart](quickstart.md) covers installation, your first spherical atmosphere, and model export.
+- [Advanced usage](advanced.md) covers opacity inputs, diagnostic workflows, and solver controls.
 - [Spherical model](spherical.md) describes the coupled structure and transfer.
 - [Validation](validation.md) describes the fiducial MARCS benchmark.
-- [Gray atmosphere model](model.md) describes the analytic transfer benchmark.
