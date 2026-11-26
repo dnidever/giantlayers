@@ -9,7 +9,7 @@ GiantLayers requires Python 3.9 or later. Install from a repository checkout wit
 The package includes a small solar-composition example. Run it from any directory after installing.
 
 ```sh
-EXAMPLE_DIR=$(python -c "from importlib.resources import files; print(files('giantlayers_examples'))")
+EXAMPLE_DIR=$(python -c "from importlib.resources import files; print(files('giantlayers.examples'))")
 giantlayers "$EXAMPLE_DIR/continuum-wavelengths.dat" "$EXAMPLE_DIR/solar-gs98.json" \
   --teff 3500 --logg 1 --mass 1 --layers 12 --upper-knots 4 \
   --steps 1 --output-model trial.mod > trial.csv
@@ -17,7 +17,7 @@ giantlayers "$EXAMPLE_DIR/continuum-wavelengths.dat" "$EXAMPLE_DIR/solar-gs98.js
 
 This continuum-only example exercises the solver and exporter. For a line-blanketed calculation, provide an atomic transition CSV with `--lines` and molecular cross sections with repeatable `--molecular-cross-section` options. The output identifies unconverged profiles. Check the maximum luminosity error and sensitivity to wavelength and depth resolution before using a model.
 
-See the [quickstart](docs/quickstart.md) for input formats, opacity sources, and the optional compiled transfer kernel. The gray Eddington benchmark is available through `python3 gray_atmosphere.py`. Run the regression tests with `python3 -m unittest discover`.
+See the [quickstart](docs/quickstart.md) for input formats, opacity sources, and the optional compiled transfer kernel. The gray Eddington benchmark is available through `python -m giantlayers.gray_atmosphere`. Run the regression tests with `python -m unittest discover`.
 
 ## Documentation
 

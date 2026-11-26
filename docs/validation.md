@@ -7,8 +7,8 @@ The main reference is the spherical MARCS GS98 giant at 3,500 K, log g = 1, one 
 The trial uses a revised MARCS atomic transition subset and ExoMolOP cross sections for TiO, H₂O, VO, and CO. Run the atomic transition converter and the ExoMolOP converter described in the [Quickstart](quickstart.md). The example abundance file supplies the GS98 mixture.
 
 ```sh
-cc -O3 -std=c99 -shared -fPIC spherical_kernel.c -o giantlayers-transfer.so -lm
-giantlayers flx_wavelengths.vac.gz examples/solar-gs98.json \
+cc -O3 -std=c99 -shared -fPIC src/giantlayers/spherical_kernel.c -o giantlayers-transfer.so -lm
+giantlayers flx_wavelengths.vac.gz src/giantlayers/examples/solar-gs98.json \
   --teff 3500 --logg 1 --mass 1 --layers 32 --core-rays 24 \
   --stride 400 --refine-stride 160 --steps 8 --upper-knots 10 \
   --kernel ./giantlayers-transfer.so --lines revised-atomic-lines.csv \
@@ -27,7 +27,7 @@ Compare temperature and pressures over the common optical depths with `python3 -
 
 ## Analytic and software checks
 
-Run `python3 -m unittest discover -v`. The tests cover the constant-density hydrostatic sphere, the effect of radiative acceleration, scattering transfer, temperature corrections, chemical pressure and charge conservation, opacity interpolation, restart interpolation, and MARCS-format export.
+Run `python -m unittest discover -v`. The tests cover the constant-density hydrostatic sphere, the effect of radiative acceleration, scattering transfer, temperature corrections, chemical pressure and charge conservation, opacity interpolation, restart interpolation, and MARCS-format export.
 
 ## Depth-resolution audit
 

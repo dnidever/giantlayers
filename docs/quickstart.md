@@ -5,7 +5,8 @@ Clone the repository and run the prototype with Python 3. The solver uses the Py
 ```sh
 git clone https://github.com/dnidever/giantlayers.git
 cd giantlayers
-python3 gray_atmosphere.py --teff 4300 --logg 1.5 > atmosphere.csv
+python -m pip install .
+python -m giantlayers.gray_atmosphere --teff 4300 --logg 1.5 > atmosphere.csv
 ```
 
 This sets the effective temperature to 4300 K and the base-10 logarithm of surface gravity to 1.5 in cgs units. The default grid has 81 layers, extends to gray optical depth 100, and uses a constant opacity of 0.1 cm²/g.
@@ -24,7 +25,7 @@ This sets the effective temperature to 4300 K and the base-10 logarithm of surfa
 The program prints maximum relative flux and hydrostatic residuals to standard error, so they stay visible when the CSV goes to a file. For grid and opacity options, run:
 
 ```sh
-python3 gray_atmosphere.py --help
+python -m giantlayers.gray_atmosphere --help
 ```
 
 ## Run with a two-group opacity table
@@ -32,7 +33,7 @@ python3 gray_atmosphere.py --help
 The nonlinear prototype can read both mass opacities from a CSV file.
 
 ```sh
-python3 nonlinear_atmosphere.py --opacity-table opacities.csv > atmosphere.csv
+python -m giantlayers.nonlinear_atmosphere --opacity-table opacities.csv > atmosphere.csv
 ```
 
 Use the following header and provide one row for each temperature–pressure pair on a complete rectangular grid with at least two values on each axis. All input values must be positive and finite. Opacities are in cm²/g.
@@ -50,9 +51,9 @@ The two groups retain equal Planck weights. Tables supplied here should contain 
 Use a matching MARCS model structure, continuum table, and sampled surface flux from the same grid point. Keep the published MARCS wavelength grid alongside the flux file. [MARCS downloads](https://marcs.astro.uu.se/data.html) · [File formats and wavelength grid](https://marcs.astro.uu.se/docs.html)
 
 ```sh
-python3 odf_transfer.py p00big2.bdf --marcs-model model.mod.gz \
+python -m giantlayers.odf_transfer p00big2.bdf --marcs-model model.mod.gz \
   --marcs-continuum model.opa.gz > bands.csv
-python3 compare_marcs_flux.py bands.csv flx_wavelengths.vac.gz model.flx.gz > comparison.csv
+python -m giantlayers.compare_marcs_flux bands.csv flx_wavelengths.vac.gz model.flx.gz > comparison.csv
 ```
 
 GiantLayers uses the MARCS true continuum absorption with ATLAS9 line opacity on the fixed temperature and pressure structure. The transfer uses plane-parallel two-stream geometry. Add `--continuum-scattering` to include isotropic coherent scattering from the MARCS table. The comparison integrates published flux samples only over bands fully covered by the MARCS wavelength grid.
@@ -66,7 +67,7 @@ Add `--heating-output heating.csv` to write the heating profile while keeping th
 The exporter writes a complete MARCS model as plain text or gzip. The command below reads an existing model and re-exports its header, 92 elemental abundances, structure, thermodynamics, and partial pressures.
 
 ```sh
-python3 marcs_writer.py input.mod.gz output.mod
+python -m giantlayers.marcs_writer input.mod.gz output.mod
 ```
 
 From Python, call `marcs_writer.write_document(model, path)` with a complete `MarcsDocument`. Supply every table and the abundance pattern for the same physical model. The gray and two-group CSV outputs contain only a subset of the fields required for export.
@@ -92,7 +93,7 @@ wavelength_vacuum_A,species,lower_energy_eV,log_gf
 ```
 
 ```sh
-python3 lte_opacity.py model.mod.gz transitions.csv mixture.json 15570 15585 0.05 opacity.csv --vmic 2
+python -m giantlayers.lte_opacity model.mod.gz transitions.csv mixture.json 15570 15585 0.05 opacity.csv --vmic 2
 ```
 
 The reference MARCS structure supplies the temperature and gas pressure. The solver recomputes the mass density, electron density and species populations at each layer. The output contains sampled line absorption, continuum absorption, and continuum scattering in cm²/g. For isotopologue lines, include the isotopic fraction in the oscillator strength used in the transition CSV.
@@ -106,7 +107,7 @@ The bundled data cover 1,000–10,000 K and include neutral atoms, first ions, H
 Provide a text file containing increasing vacuum wavelengths in Å. The transfer uses the same grid for all layers and integrates in frequency using trapezoidal weights. Include broad wavelength coverage and enough samples to resolve the lines when interpreting the result as a bolometric energy balance.
 
 ```sh
-python3 native_transfer.py model.mod.gz transitions.csv mixture.json wavelengths.txt heating.csv
+python -m giantlayers.native_transfer model.mod.gz transitions.csv mixture.json wavelengths.txt heating.csv
 ```
 
 Add `--adjust-layers 6 --steps 3` to try up to three damped temperature corrections in the outermost six layers. Gas pressure and column mass stay fixed. Each trial recomputes LTE equilibrium, opacity, and transfer, and is accepted only if it reduces the maximum outer-layer net heating relative to thermal emission. Deeper layers supply a fixed lower structure.
@@ -146,7 +147,7 @@ The first fiducial experiment sampled ExoMol ToTo and POKAZATEL cross sections o
 Run the sampling benchmark with cross-section tables on a common wavelength axis. It keeps the reference atmosphere fixed and reports surface flux, the maximum total-flux error with depth, and the heating/flux closure error on each nested grid. Supply any additional wavelengths outside the tabulated range or in line windows through `--supplemental-wavelengths`.
 
 ```sh
-python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json.gz h2o.json.gz --strides 4 2 1 > sampling.csv
+python -m giantlayers.benchmark_sampling model.mod.gz transitions.csv mixture.json tio.json.gz h2o.json.gz --strides 4 2 1 > sampling.csv
 ```
 
 For expanded optical and infrared coverage, include ExoMol HyVO and Li2015 CO tables on the same grid. If the CO table replaces the explicit CO transitions, remove those transitions from the input CSV. A header-only transition CSV is valid when using cross sections alone. These files add molecular opacity over the common sampled range and inherit the temperature and pressure coverage of the source tables. [VO HyVO](https://exomol.com/data/molecules/VO/51V-16O/HyVO/) · [CO Li2015](https://www.exomol.com/data/molecules/CO/12C-16O/Li2015/)
@@ -156,13 +157,13 @@ For expanded optical and infrared coverage, include ExoMol HyVO and Li2015 CO ta
 Pass the published vacuum grid directly to native transfer with `--quadrature wavelength`. The reader accepts the original gzip file, and the transfer processes the opacity in wavelength blocks while retaining quadrature weights across block boundaries.
 
 ```sh
-python3 native_transfer.py model.mod.gz transitions.csv mixture.json flx_wavelengths.vac.gz full-grid.csv --quadrature wavelength --molecular-cross-section tio.json.gz
+python -m giantlayers.native_transfer model.mod.gz transitions.csv mixture.json flx_wavelengths.vac.gz full-grid.csv --quadrature wavelength --molecular-cross-section tio.json.gz
 ```
 
 To compare coarse startup sampling with the full published grid, pass the same input file to the sampling benchmark. Stride 10 retains every tenth sample and both endpoints. Stride 1 uses all 100,724 wavelengths.
 
 ```sh
-python3 benchmark_sampling.py model.mod.gz transitions.csv mixture.json tio.json.gz --reference-wavelengths flx_wavelengths.vac.gz --strides 10 1 --quadrature wavelength > marcs-sampling.csv
+python -m giantlayers.benchmark_sampling model.mod.gz transitions.csv mixture.json tio.json.gz --reference-wavelengths flx_wavelengths.vac.gz --strides 10 1 --quadrature wavelength > marcs-sampling.csv
 ```
 
 Use the native-resolution opacity tables when comparing the grids. The transfer evaluates the available opacities at the MARCS sample positions. This matches the published wavelength axis and the wavelength integration convention. The geometry, opacity inventory, and convection model also affect how closely the calculated atmosphere reproduces MARCS. [MARCS wavelength download](https://marcs.astro.uu.se/docs.html) · [MARCS methods](https://arxiv.org/abs/0805.0554)
@@ -172,7 +173,7 @@ Use the native-resolution opacity tables when comparing the grids. The transfer 
 Convert the published MARCS oscillator-strength revisions from VALD air wavelengths into the native vacuum-wavelength transition format. These files provide a subset of the atomic lines used by MARCS. The converted transitions use Doppler broadening. [MARCS auxiliary atomic data](https://marcs.astro.uu.se/docs.html#Auxiliary)
 
 ```sh
-python3 marcs_atomic_lines.py astroph_gfVALD1.dat astroph_gfVALD2.dat > revised-atomic-lines.csv
+python -m giantlayers.marcs_atomic_lines astroph_gfVALD1.dat astroph_gfVALD2.dat > revised-atomic-lines.csv
 ```
 
 An atomic transition CSV can supply `damping_s` for a density-independent Lorentz damping rate in s⁻¹. Add `electron_damping_cm3_s` and `neutral_h_damping_cm3_s` for rate coefficients at 10,000 K. The optional `electron_damping_exponent` and `neutral_h_damping_exponent` multiply those coefficients by a power of `T / 10,000 K`. GiantLayers multiplies each coefficient by its local perturber number density and adds the three rates before computing the line profile. Missing coefficients and exponents default to zero. Convert logarithmic coefficients to linear units when preparing the CSV.
@@ -182,7 +183,7 @@ Convert a Kurucz wavelength-format GFALL or per-ion `.pos` list with `python3 -m
 Use a spherical model and the same opacity inputs to compare surface transfer in both geometries. Pass several `--molecular-cross-section` options to include multiple absorbers. The spherical solver traces rays through atmospheric shells and integrates the emergent intensity over the apparent disk. The plane-parallel case uses the same surface angles and quadrature weights. Both modes use LTE true absorption and fixed temperatures and gas pressures for this benchmark.
 
 ```sh
-python3 spherical_transfer.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 50 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-comparison.csv
+python -m giantlayers.spherical_transfer model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 50 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-comparison.csv
 ```
 
 The CSV contains monochromatic surface fluxes per Hz and frequency weights. The printed spherical ratio normalizes the flux to the MARCS reference radius. The planar ratio uses the corresponding target flux at the outer boundary. Reduce `--stride` and increase `--core-rays` to test sensitivity to the wavelength and ray grids.
@@ -192,7 +193,7 @@ The CSV contains monochromatic surface fluxes per Hz and frequency weights. The 
 Use the same spherical model and opacity inputs with the depth-resolved solver. It iterates the isotropic coherent continuum scattering source on the shared impact-parameter rays. Net heating is calculated from true absorption and the difference between the mean intensity and the LTE Planck function. Use `--absorption-only` to isolate the effect of scattering.
 
 ```sh
-python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 100 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-heating.csv
+python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 100 --core-rays 24 --molecular-cross-section tio.json.gz > spherical-heating.csv
 ```
 
 The CSV reports integrated radiative flux, luminosity, and pointwise true-absorption heating at each layer. The shell columns give the mean net heating and energy gain between the current layer and the next deeper layer, calculated from the luminosity difference and shell mass. Positive heating means the gas gains energy. The shell values balance the luminosity change by construction. Standard error reports how far a separate trapezoidal integration of the pointwise rates departs from that budget. Use that difference to assess whether pointwise heating is suitable for a temperature update. The MARCS temperature, pressure, and convection profiles are held fixed.
@@ -210,8 +211,8 @@ Add `--luminosity-target` to fit the MARCS surface luminosity alongside the oute
 With a coarse startup stride, `--verify-full` reevaluates the accepted profile on every input wavelength and writes the full-grid diagnostics. The verification holds the accepted temperatures fixed. For larger runs, the optional C99 kernel accelerates the ray solve while chemistry and opacity remain in Python.
 
 ```sh
-cc -O3 -std=c99 -shared -fPIC spherical_kernel.c -o spherical_kernel.so -lm
-python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 400 --adjust-layers 3 --steps 5 --luminosity-target --verify-full --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > luminosity-check.csv
+cc -O3 -std=c99 -shared -fPIC src/giantlayers/spherical_kernel.c -o spherical_kernel.so -lm
+python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --stride 400 --adjust-layers 3 --steps 5 --luminosity-target --verify-full --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > luminosity-check.csv
 ```
 
 ### Solve pressure and radius on a fixed temperature profile
@@ -219,7 +220,7 @@ python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json 
 Run the spherical hydrostatic benchmark on a MARCS reference model.
 
 ```sh
-python3 spherical_hydrostatic.py model.mod.gz > hydrostatic.csv
+python -m giantlayers.spherical_hydrostatic model.mod.gz > hydrostatic.csv
 ```
 
 The benchmark takes the temperature, composition, and outer gas pressure from MARCS. It integrates the published density over radial distance to define a comparison column-mass grid. GiantLayers then computes its own gas pressure, density, and radius at each depth using spherical gravity and its native LTE equation of state. The reference radius is set by the input mass and gravity at the layer with Rosseland optical depth one. This version solves gas-pressure balance. Radiation and turbulent pressure are outside that equation.
@@ -237,7 +238,7 @@ The reconstructed CSV reports radial column mass measured from the upper boundar
 Combine `--hydrostatic` with `--adjust-layers` to solve hydrostatic balance before each temperature trial, including the finite-difference perturbations and the line-search evaluations. The original radial mass grid, surface gas pressure, stellar mass, and gravity define the boundary throughout the run. Each trial recomputes pressure, electron pressure, density, radius, opacities, and scattering. With `--luminosity-target`, it also fits the target at the reconstructed reference radius.
 
 ```sh
-python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --adjust-layers 3 --steps 2 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-trial.csv
+python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --adjust-layers 3 --steps 2 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-trial.csv
 ```
 
 The output includes the updated temperatures and hydrostatic structure. The Rosseland layer labels and convective luminosity fractions are carried over from MARCS for this benchmark.
@@ -247,7 +248,7 @@ The output includes the updated temperatures and hydrostatic structure. The Ross
 Run the Henyey mixing-length calculation on the fiducial pressure and temperature profile. GiantLayers computes the logarithmic temperature gradient, estimates the heat capacity and thermal expansion from its native LTE chemistry, and reports the convective velocity and flux beside the MARCS values. The default benchmark uses the published MARCS Rosseland opacities to isolate the convection calculation. [MARCS mixing-length equations](https://arxiv.org/abs/0805.0554)
 
 ```sh
-python3 mixing_length.py model.mod.gz > convection.csv
+python -m giantlayers.mixing_length model.mod.gz > convection.csv
 ```
 
 Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from GiantLayers opacities. Add the atomic transition list with `--lines` and molecular tables with repeatable `--molecular-cross-section` arguments. Use `--hydrostatic` to evaluate convection on the reconstructed pressure and radius profile. These commands diagnose convection on a fixed temperature structure.
@@ -257,7 +258,7 @@ Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from G
 Add `--native-convection` to use the Henyey flux in place of the benchmark's published convection. Each trial computes a Rosseland mean from the same line and continuum opacities used by spherical transfer. It then recomputes the convective flux from the trial temperature and gas pressure gradients and the native LTE equation of state.
 
 ```sh
-python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --native-convection --adjust-layers 3 --adjust-deep 2 --steps 1 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-convection.csv
+python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --hydrostatic --native-convection --adjust-layers 3 --adjust-deep 2 --steps 1 --luminosity-target --stride 400 --molecular-cross-section tio.json.gz > coupled-convection.csv
 ```
 
 The outer temperature variables target adjacent-shell luminosity balance. The photospheric mode targets absolute surface luminosity, and `--adjust-deep` varies the deepest temperatures individually to target total luminosity at those layers. The solver reports these errors separately. This trial adjusts selected depths and retains the original radial mass grid and outer pressure.
@@ -270,17 +271,17 @@ Use `--global-balance` to solve for the temperature profile with native spherica
 GiantLayers identifies the contiguous region extending inward to the model's deepest layer where convection carries at least 0.01% of the target luminosity. Each layer in that region gets its own temperature variable. Above it, fractional temperature corrections are interpolated in the input model's log Rosseland depth between five control points by default. Change that number with `--upper-knots`. The solver evaluates the total luminosity error at every layer. Its line search accepts a step when the RMS error plus one quarter of the maximum absolute error decreases.
 
 ```sh
-python3 spherical_heating.py model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --global-balance --stride 400 --core-rays 24 --steps 1 --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > global-luminosity.csv
+python -m giantlayers.spherical_heating model.mod.gz revised-atomic-lines.csv mixture.json flx_wavelengths.vac.gz --global-balance --stride 400 --core-rays 24 --steps 1 --kernel ./spherical_kernel.so --molecular-cross-section tio.json.gz > global-luminosity.csv
 ```
 
 The CSV contains the corrected structure and the relative total-flux error at every layer. Increase `--steps` to attempt additional corrections. For a wavelength-resolution check, add `--verify-full` to reevaluate the resulting profile across the full input wavelength grid.
 
 ### Start from stellar parameters
 
-From a repository checkout, install with `python3 -m pip install .`. The `giantlayers` command takes a vacuum wavelength grid in Å and a JSON mapping from element symbols to absolute logarithmic abundances. For an element X, the abundance is log10(N_X/N_H) + 12. Include hydrogen as `"H": 12`. Edit a copy of `examples/solar-gs98.json` to set the abundances of your star. The example is the solar mixture tabulated in the GS98 MARCS grid; omitted elements are initialized to the trace abundance sentinel. [MARCS model grids](https://marcs.astro.uu.se/)
+From a repository checkout, install with `python3 -m pip install .`. The `giantlayers` command takes a vacuum wavelength grid in Å and a JSON mapping from element symbols to absolute logarithmic abundances. For an element X, the abundance is log10(N_X/N_H) + 12. Include hydrogen as `"H": 12`. Edit a copy of `src/giantlayers/examples/solar-gs98.json` to set the abundances of your star. The example is the solar mixture tabulated in the GS98 MARCS grid; omitted elements are initialized to the trace abundance sentinel. [MARCS model grids](https://marcs.astro.uu.se/)
 
 ```sh
-giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+giantlayers src/giantlayers/examples/continuum-wavelengths.dat src/giantlayers/examples/solar-gs98.json \
   --teff 3500 --logg 1 --mass 1 --layers 12 --upper-knots 4 \
   --steps 1 --output-model trial.mod > trial.csv
 ```
@@ -294,7 +295,7 @@ The MARCS-format export contains native thermochemical partial pressures, Rossel
 Use `--output-atlas trial.dat` to export the same solution as an ATLAS9 `READ DECK6` atmosphere. Use a `.gz` suffix for gzip compression. You can request both formats in one run.
 
 ```sh
-giantlayers examples/continuum-wavelengths.dat examples/solar-gs98.json \
+giantlayers src/giantlayers/examples/continuum-wavelengths.dat src/giantlayers/examples/solar-gs98.json \
   --teff 3500 --logg 1 --mass 1 --steps 1 \
   --output-model trial.mod --output-atlas trial.dat.gz > trial.csv
 ```
@@ -371,13 +372,13 @@ Download the rectangular H₂–H₂, H₂–He, H₂–H, and He–H files from
 ```python
 import json
 from giantlayers import initialize
-from native_transfer import read_wavelengths
-from spherical_heating import balance_all_layers
+from giantlayers.native_transfer import read_wavelengths
+from giantlayers.spherical_heating import balance_all_layers
 
-with open("examples/solar-gs98.json") as stream:
+with open("src/giantlayers/examples/solar-gs98.json") as stream:
     abundances = json.load(stream)
 seed, boundary = initialize(3500, 1, 1, abundances, layers=12)
-wavelengths = read_wavelengths("examples/continuum-wavelengths.dat")
+wavelengths = read_wavelengths("src/giantlayers/examples/continuum-wavelengths.dat")
 model, diagnostics, history, knots, convective_start = balance_all_layers(
     seed, wavelengths, (), {}, boundary=boundary, core_rays=12, steps=1
 )
