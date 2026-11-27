@@ -12,12 +12,17 @@ from .benchmark_sampling import nested_wavelengths
 from .gray_atmosphere import SIGMA
 from .hminus import K_B, K_EV
 from .lte_chemistry import Thermochemistry
-from .lte_opacity import H_EV_S, composition, layer_opacities, prepare_layers, read_lines
+from .lte_opacity import H_EV_S, LIGHT, composition, layer_opacities, prepare_layers, read_lines
 from .marcs_writer import read_document
 from .molecular_cross_section import MolecularCrossSection
 from .native_transfer import read_wavelengths, spectral_quadrature
 from .odf_transfer import planck_nu
 from .spherical_hydrostatic import G, SOLAR_MASS, reconstruct_for_transfer
+
+
+def lte_radiation_pressure(temperature):
+    """Isotropic LTE radiation pressure in dyn/cm²."""
+    return 4 * SIGMA * temperature**4 / (3 * LIGHT)
 
 
 def slopes(axis, values, quadratic_endpoints=False):
@@ -81,17 +86,29 @@ class Enthalpy:
                             - kt*interpolate(axis, derivative, log_t))
         return math.fsum(n*energy[name] for name, n in gas.number_densities.items() if n) / gas.mass_density
 
-    def derivatives(self, temperature, pressure, abundances):
+    def derivatives(self, temperature, pressure, abundances, *, include_radiation=False):
         """Return Cp, the density derivative Q, and the adiabatic gradient."""
         lower = max(self.chemistry.temperatures[0], temperature*0.998)
         upper = min(self.chemistry.temperatures[-1], temperature*1.002)
         gas = self.chemistry.solve(temperature, pressure, abundances)
-        a, b = (self.chemistry.solve(t, pressure, abundances, initial=gas) for t in (lower, upper))
-        cp = (self(b)-self(a))/(upper-lower)
+        total_pressure = pressure
+        if include_radiation:
+            total_pressure += lte_radiation_pressure(temperature)
+            # Keep the pressure perturbation safely inside the positive gas-pressure domain.
+            upper = min(upper, temperature * (1 + 0.05 * pressure /
+                                               lte_radiation_pressure(temperature)))
+            a, b = (self.chemistry.solve(t, total_pressure-lte_radiation_pressure(t),
+                                         abundances, initial=gas) for t in (lower, upper))
+            ha, hb = (self(state) + 4*lte_radiation_pressure(state.temperature)/state.mass_density
+                      for state in (a, b))
+        else:
+            a, b = (self.chemistry.solve(t, pressure, abundances, initial=gas) for t in (lower, upper))
+            ha, hb = self(a), self(b)
+        cp = (hb-ha)/(upper-lower)
         q = math.log(a.mass_density/b.mass_density)/math.log(upper/lower)
         if cp <= 0 or q <= 0:
             raise ValueError(f"Invalid thermodynamic derivative at T={temperature:g} K and P={pressure:g}")
-        adiabatic = pressure*q/(gas.mass_density*temperature*cp)
+        adiabatic = total_pressure*q/(gas.mass_density*temperature*cp)
         return gas.mass_density, cp, q, adiabatic
 
 
@@ -128,7 +145,8 @@ def native_rosseland(model, wavelengths, lines, mixture, tables, chemistry, vmic
         yield numerator/denominator
 
 
-def evaluate(model, mixture, rosseland=None, chemistry=None, radiative_acceleration=()):
+def evaluate(model, mixture, rosseland=None, chemistry=None, radiative_acceleration=(), *,
+             include_radiation=False):
     """Compute the mixing-length structure on the supplied pressure and radius grid."""
     chemistry = chemistry or Thermochemistry()
     enthalpy = Enthalpy(chemistry)
@@ -145,7 +163,19 @@ def evaluate(model, mixture, rosseland=None, chemistry=None, radiative_accelerat
     t = [row[3] for row in model.structure]
     if any(a >= b for a, b in zip(p, p[1:])):
         raise ValueError("Gas pressure must increase inward")
-    gradients = slopes(list(map(math.log, p)), list(map(math.log, t)), quadratic_endpoints=True)
+    log_t = list(map(math.log, t))
+    gradients = slopes(list(map(math.log, p)), log_t, quadratic_endpoints=True)
+    if include_radiation:
+        pressures = [gas + lte_radiation_pressure(temp) for gas, temp in zip(p, t)]
+        first_thick = next((i for i, row in enumerate(model.structure) if row[0] >= 0), len(p))
+        pivot = max(0, first_thick - 1)
+        if first_thick < len(p) and len(p) - pivot >= 2:
+            thick_pressures = pressures[pivot:]
+            if any(a >= b for a, b in zip(thick_pressures, thick_pressures[1:])):
+                raise ValueError("Gas plus LTE radiation pressure must increase in optically thick layers")
+            thick_gradients = slopes(list(map(math.log, thick_pressures)), log_t[pivot:],
+                                     quadratic_endpoints=True)
+            gradients[first_thick:] = thick_gradients[first_thick-pivot:]
     ref_flux = float(model.header[2].split()[0])
     if rosseland is None:
         rosseland = [row[1] for row in model.thermodynamics]
@@ -156,11 +186,15 @@ def evaluate(model, mixture, rosseland=None, chemistry=None, radiative_accelerat
         zip(model.structure, p, t, gradients, rosseland, model.thermodynamics), 1
     ):
         r = radius - row[2]
-        density, cp, q, adiabatic = enthalpy.derivatives(temperature, pressure, abundances)
-        gravity = G*stellar_mass/r**2 - force[i-1]
+        thick_radiation = include_radiation and row[0] >= 0
+        density, cp, q, adiabatic = enthalpy.derivatives(temperature, pressure, abundances,
+                                                        include_radiation=thick_radiation)
+        # Radiation pressure contributes directly to the total-pressure gradient.
+        gravity = G*stellar_mass/r**2 - (0 if thick_radiation else force[i-1])
+        mixing_pressure = pressures[i-1] if thick_radiation else pressure
         if gravity <= 0:
             raise ValueError("Mixing-length convection requires positive effective gravity")
-        flux, velocity = henyey_flux(temperature, pressure, density, gravity,
+        flux, velocity = henyey_flux(temperature, mixing_pressure, density, gravity,
                                      opacity, gradient, cp, q, adiabatic, alpha, y, nu)
         target = ref_flux*(radius/r)**2
         yield (i, row[0], temperature, pressure, opacity, gradient, adiabatic, cp, q, velocity,
@@ -177,6 +211,8 @@ def main():
     parser.add_argument("--lines", type=Path)
     parser.add_argument("--vmic", type=float, default=2)
     parser.add_argument("--molecular-cross-section", action="append", default=[])
+    parser.add_argument("--lte-radiation-pressure", action="store_true",
+                        help="Include LTE radiation in convection at Rosseland depth >= 1")
     args = parser.parse_args()
     try:
         chemistry = Thermochemistry()
@@ -190,7 +226,8 @@ def main():
             lines = read_lines(args.lines) if args.lines else []
             tables = [MolecularCrossSection(path) for path in args.molecular_cross_section]
             rosseland = list(native_rosseland(model, wave, lines, mixture, tables, chemistry, args.vmic))
-        rows = list(evaluate(model, mixture, rosseland, chemistry))
+        rows = list(evaluate(model, mixture, rosseland, chemistry,
+                             include_radiation=args.lte_radiation_pressure))
     except (IndexError, OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     writer = csv.writer(sys.stdout)

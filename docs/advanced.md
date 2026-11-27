@@ -229,6 +229,8 @@ python -m giantlayers.mixing_length model.mod.gz > convection.csv
 
 Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from GiantLayers opacities. Add the atomic transition list with `--lines` and molecular tables with repeatable `--molecular-cross-section` arguments. Use `--hydrostatic` to evaluate convection on the reconstructed pressure and radius profile. These commands diagnose convection on a fixed temperature structure.
 
+Use `--lte-radiation-pressure` with the standalone `giantlayers.mixing_length` diagnostic to test a total-pressure gradient at Rosseland optical depths of one and greater. In those layers, it evaluates the thermal expansion and enthalpy derivatives at constant gas plus LTE radiation pressure. The diagnostic uses the isotropic LTE approximation for radiation pressure. This option is for fixed-structure comparisons. The coupled atmosphere command uses the gas-pressure formulation.
+
 ### Recompute convection during the coupled solve
 
 Add `--native-convection` to use the Henyey flux in place of the benchmark's published convection. Each trial computes a Rosseland mean from the same line and continuum opacities used by spherical transfer. It then recomputes the convective flux from the trial temperature and gas pressure gradients and the native LTE equation of state.

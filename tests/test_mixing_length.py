@@ -1,10 +1,11 @@
 """Check mixing-length stability and the Henyey algebraic closure."""
 
 import math
+from types import SimpleNamespace
 import unittest
 
 from giantlayers.gray_atmosphere import SIGMA
-from giantlayers.mixing_length import henyey_flux, slopes
+from giantlayers.mixing_length import Enthalpy, henyey_flux, lte_radiation_pressure, slopes
 
 
 class MixingLengthChecks(unittest.TestCase):
@@ -16,6 +17,29 @@ class MixingLengthChecks(unittest.TestCase):
 
     def test_stable_layer_carries_no_convective_flux(self):
         self.assertEqual(henyey_flux(3500, 100, 1e-8, 10, 0.1, 0.2, 2e8, 1, 0.4), (0, 0))
+
+    def test_ideal_gas_with_radiation_derivatives_hold_total_pressure_fixed(self):
+        gas_constant = 8e7
+
+        def solve(temperature, pressure, abundances, initial=None):
+            return SimpleNamespace(temperature=temperature,
+                                   mass_density=pressure/(gas_constant*temperature))
+
+        class IdealGasEnthalpy(Enthalpy):
+            def __call__(self, gas):
+                return 2.5*gas_constant*gas.temperature
+
+        chemistry = SimpleNamespace(temperatures=(1000, 10000), atoms={}, molecules={}, solve=solve)
+        eos = IdealGasEnthalpy(chemistry)
+        temperature, pressure = 7500, 300
+        prad = lte_radiation_pressure(temperature)
+        density, cp, q, ad = eos.derivatives(temperature, pressure, {}, include_radiation=True)
+        expected_q = 1 + 4*prad/pressure
+        expected_cp = 2.5*gas_constant + 4*prad/(density*temperature)*(4 + expected_q)
+        expected_ad = (pressure+prad)*expected_q/(density*temperature*expected_cp)
+
+        for actual, expected in ((q, expected_q), (cp, expected_cp), (ad, expected_ad)):
+            self.assertTrue(math.isclose(actual, expected, rel_tol=1e-4))
 
     def test_convective_velocity_and_flux_satisfy_henyey_equations(self):
         t, p, rho, g, kappa, gradient, cp, q, adiabatic = (
