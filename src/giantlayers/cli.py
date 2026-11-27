@@ -14,6 +14,7 @@ from tempfile import NamedTemporaryFile
 from .atlas_writer import write_atlas
 from .benchmark_sampling import nested_wavelengths
 from .collision_induced import HitranCIA
+from .depth_refinement import correct_inserted_layer
 from .gray_atmosphere import SIGMA
 from .lte_chemistry import Thermochemistry
 from .lte_opacity import read_lines
@@ -127,7 +128,7 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
     return MarcsDocument(header, tuple(vector), structure, thermo, ()), boundary
 
 
-def restart_temperatures(seed, path, interpolate=False):
+def restart_temperatures(seed, path, interpolate=False, *, inserted_mass=None):
     """Resume from CSV temperatures on the same radial column-mass grid."""
     with path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
@@ -147,6 +148,11 @@ def restart_temperatures(seed, path, interpolate=False):
         if ((target[0] < mass[0] and not math.isclose(target[0], mass[0], abs_tol=1e-9))
                 or (target[-1] > mass[-1] and not math.isclose(target[-1], mass[-1], rel_tol=1e-9))):
             raise ValueError("The restart must cover the entire requested radial column-mass grid")
+        if inserted_mass is not None:
+            match = [m for m in target if m != inserted_mass]
+            if len(match) != len(mass) or any(not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+                                               for a,b in zip(match, mass)):
+                raise ValueError("Local refinement correction requires exactly one new layer on the restart mesh")
         scale = target[-1]/140
         axis = [math.log1p(x/scale) for x in mass]
         log_temp = list(map(math.log, temp))
@@ -207,6 +213,8 @@ def main():
                         help="Concentrate deep grid points toward the bottom with a power above one")
     parser.add_argument("--refine-mass-at", type=float, action="append", default=[], metavar="GM_CM2",
                         help="Insert a layer at this column mass without moving existing layers (repeatable)")
+    parser.add_argument("--local-refinement-correction", type=float, metavar="COLUMN",
+                        help="Balance a newly inserted column mass and its neighboring temperatures before fitting")
     parser.add_argument("--surface-pressure", type=float, default=1.0, help="Gas pressure in dyn/cm²")
     parser.add_argument("--column-bottom", type=float, default=700.0, help="Bottom column mass in g/cm²")
     parser.add_argument("--gray-tau-bottom", type=float, default=32.0, help="Seed optical depth at bottom")
@@ -315,7 +323,8 @@ def main():
         omitted = {path.resolve() for path in args.test_omit_hot_opacity}
         if omitted:
             if (args.steps != 0 or args.equilibrate_surface or not args.restart_csv
-                    or args.photospheric_anchor or args.radiative_force):
+                    or args.photospheric_anchor or args.radiative_force
+                    or args.local_refinement_correction is not None):
                 raise ValueError("--test-omit-hot-opacity requires --steps 0 and --restart-csv with structure and temperature updates disabled")
             if args.output_model or args.output_atlas:
                 raise ValueError("The hot-opacity stress test supports diagnostic output only")
@@ -378,10 +387,16 @@ def main():
         if len({tuple(sorted(table.species)) for table in cia}) != len(cia):
             raise ValueError("Provide one CIA table per collision pair")
         tables = [*molecular, *cia]
+        if args.local_refinement_correction is not None:
+            if (not args.interpolate_restart or not args.restart_csv
+                    or args.local_refinement_correction not in args.refine_mass_at):
+                raise ValueError("--local-refinement-correction requires a matching --refine-mass-at, "
+                                 "--restart-csv, and --interpolate-restart")
         if args.interpolate_restart and not args.restart_csv:
             raise ValueError("--interpolate-restart requires --restart-csv")
         if args.restart_csv:
-            seed = restart_temperatures(seed, args.restart_csv, args.interpolate_restart)
+            seed = restart_temperatures(seed, args.restart_csv, args.interpolate_restart,
+                                        inserted_mass=args.local_refinement_correction)
         model = seed
         def cache_key():
             return transfer_key(fingerprint, model, reference, args.core_rays, args.vmic,
@@ -414,6 +429,47 @@ def main():
 
         backend_name = "compiled" if args.kernel else "Python"
         print(f"Transfer kernel: {backend_name}", file=sys.stderr)
+        local_reference = None
+        if args.local_refinement_correction is not None:
+            print(f"Testing a local temperature correction at column mass "
+                  f"{args.local_refinement_correction:g} g/cm²", file=sys.stderr, flush=True)
+            model, _ = reconstruct_for_transfer(model, boundary=boundary)
+            wavelengths = reference
+            before = transfer_on_grid()
+            exact = tuple(row[-1] for row in total_flux_budget(model, before, True))
+            sample = nested_wavelengths(reference, max(args.stride, math.ceil(len(reference)/1260)))
+
+            def sampled_errors(profile):
+                trial, _ = reconstruct_for_transfer(profile, boundary=boundary)
+                transfer = evaluate(trial, sample, lines, {}, tables, core_rays=args.core_rays,
+                                    vmic=args.vmic, chemistry=boundary.chemistry, kernel_path=args.kernel,
+                                    native_convection=True,
+                                    hydrostatic_force=boundary.radiative_acceleration)
+                return tuple(row[-1] for row in total_flux_budget(trial, transfer, True))
+
+            candidate, evaluations = correct_inserted_layer(
+                model, boundary.column_mass.index(args.local_refinement_correction), sampled_errors,
+                exact, (boundary.chemistry.temperatures[0], boundary.chemistry.temperatures[-1]),
+                args.flux_tolerance,
+            )
+            peak_before = max(map(abs, exact))
+            local_reference = before
+            if candidate is not model:
+                original = model
+                model, _ = reconstruct_for_transfer(candidate, boundary=boundary)
+                after = transfer_on_grid()
+                peak_after = max(abs(row[-1]) for row in total_flux_budget(model, after, True))
+                if peak_after < peak_before:
+                    local_reference = after
+                    print(f"Accepted local refinement on {len(reference):,} wavelengths "
+                          f"({peak_before:.3%} to {peak_after:.3%}; {evaluations} sampled evaluations)",
+                          file=sys.stderr, flush=True)
+                else:
+                    model = original
+                    last_full_transfer = before
+            if local_reference is before:
+                print(f"Local refinement retained the interpolated seed "
+                      f"({peak_before:.3%}; {evaluations} sampled evaluations)", file=sys.stderr, flush=True)
         update_structure = args.photospheric_anchor or args.radiative_force
         for index, (stride, line_scale) in enumerate(stages, 1):
             wavelengths = nested_wavelengths(reference, stride)
@@ -432,7 +488,8 @@ def main():
                 cached = (read_residuals(args.transfer_cache, cache_key(), len(model.structure))
                           if args.transfer_cache else None)
                 if cached is None:
-                    exact_transfer = transfer_on_grid(grid=reference)
+                    exact_transfer = (local_reference if index == 1 and line_scale == 1.0
+                                      and local_reference is not None else transfer_on_grid(grid=reference))
                     exact_flux = tuple(row[-1] for row in total_flux_budget(model, exact_transfer, True))
                     exact_heating = exact_transfer[8]
                 else:
@@ -448,7 +505,8 @@ def main():
                       file=sys.stderr, flush=True)
             if args.steps == 0 and args.workers > 1:
                 model, _ = reconstruct_for_transfer(model, boundary=boundary)
-                result = transfer_on_grid(line_scale=line_scale)
+                result = (local_reference if index == 1 and wavelengths == reference and line_scale == 1.0
+                          and local_reference is not None else transfer_on_grid(line_scale=line_scale))
                 errors = [row[-1] for row in total_flux_budget(model, result, True)]
                 rms = math.sqrt(math.fsum(x*x for x in errors)/len(errors))
                 report_balance_step(0, (rms, max(map(abs, errors)), errors[0], errors[-1]))
@@ -475,7 +533,7 @@ def main():
             if update_structure and index < len(stages):
                 boundary, _ = update_boundary(model, result, boundary, args.photospheric_anchor,
                                               args.radiative_force)
-        if ((args.verify_full or args.full_grid_correction) and wavelengths != reference
+        if ((args.verify_full or args.full_grid_correction or args.local_refinement_correction is not None) and wavelengths != reference
                 and (not args.equilibrate_surface or update_structure)):
             print(f"Verifying on {len(reference):,} wavelengths", file=sys.stderr, flush=True)
             wavelengths = reference

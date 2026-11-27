@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from giantlayers.collision_induced import HitranCIA
 from giantlayers import initialize, restart_temperatures
+from giantlayers.depth_refinement import correct_inserted_layer
 from giantlayers.hminus import K_B, K_EV
 from giantlayers.lte_chemistry import AMU, Thermochemistry
 from giantlayers.lte_opacity import C_ANGSTROM_S, H_EV_S, profile_parameters, rayleigh_cross_sections, read_lines
@@ -46,6 +47,20 @@ class NativeAtmosphereChecks(unittest.TestCase):
         self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0)
         linear[1] = (0, 0, 0, math.exp(8.05))
         self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0.03)
+
+    def test_local_refinement_finds_convective_branch_without_moving_other_temperatures(self):
+        model, _ = initialize(3500, 0, 1, {"H": 12}, layers=8)
+        index = 6
+
+        def transfer(trial):
+            change = trial.structure[index][3]/model.structure[index][3]-1
+            return (0,)*index + (10*max(0, change-.02)-.5, 0)
+
+        fixed, evaluations = correct_inserted_layer(model, index, transfer, transfer(model),
+                                                    (1000, 10000), .01)
+        self.assertGreater(evaluations, 1)
+        self.assertLess(max(map(abs, transfer(fixed))), .01)
+        self.assertEqual(fixed.structure[:index-1], model.structure[:index-1])
 
     def test_nested_mass_grid_preserves_layers_and_reference_anchor(self):
         options = dict(layers=56, column_bottom=1750, surface_pressure=0.5)
