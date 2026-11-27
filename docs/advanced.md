@@ -229,7 +229,7 @@ python -m giantlayers.mixing_length model.mod.gz > convection.csv
 
 Pass `--wavelengths flx_wavelengths.vac.gz` to compute the Rosseland mean from GiantLayers opacities. Add the atomic transition list with `--lines` and molecular tables with repeatable `--molecular-cross-section` arguments. Use `--hydrostatic` to evaluate convection on the reconstructed pressure and radius profile. These commands diagnose convection on a fixed temperature structure.
 
-Use `--lte-radiation-pressure` with the standalone `giantlayers.mixing_length` diagnostic to test a total-pressure gradient at Rosseland optical depths of one and greater. In those layers, it evaluates the thermal expansion and enthalpy derivatives at constant gas plus LTE radiation pressure. The diagnostic uses the isotropic LTE approximation for radiation pressure. This option is for fixed-structure comparisons. The coupled atmosphere command uses the gas-pressure formulation.
+In the development version, use `--lte-radiation-pressure` with the standalone `giantlayers.mixing_length` diagnostic to test a total-pressure gradient at Rosseland optical depths of one and greater. In those layers, it evaluates the thermal expansion and enthalpy derivatives at constant gas plus LTE radiation pressure. The diagnostic uses the isotropic LTE approximation for radiation pressure. This option is for fixed-structure comparisons. The coupled atmosphere command uses the gas-pressure formulation.
 
 ### Recompute convection during the coupled solve
 
@@ -295,7 +295,7 @@ The optional boundary updates use the latest solved profile between wavelength s
 
 ## Check depth resolution and compare with a reference
 
-With `--deep-layers`, use `--deep-grid-power 2` to concentrate the deep points toward the inner boundary while retaining the same number of points and the same depth endpoints. Use `--restart-csv` with `--interpolate-restart` to move a solved temperature profile to a different number of layers. The previous mass grid must cover the new one. GiantLayers recomputes the gas structure and transfer on the new grid. The solver reports how many final layers used molecular cross sections clamped to the edge of their temperature or pressure axes.
+In the development version, combine `--deep-layers` with `--deep-grid-power 2` to concentrate the deep points toward the inner boundary while retaining the same number of points and the same depth endpoints. Use `--restart-csv` with `--interpolate-restart` to move a solved temperature profile to a different number of layers. The previous mass grid must cover the new one. GiantLayers recomputes the gas structure and transfer on the new grid. The solver reports how many final layers used molecular cross sections clamped to the edge of their temperature or pressure axes.
 
 Compare the exported model with a published model at the same stellar parameters. The comparison interpolates only over the shared Rosseland depth range and reports the temperature difference in kelvin and the pressure differences in dex.
 
