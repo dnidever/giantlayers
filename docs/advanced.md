@@ -295,7 +295,7 @@ The optional boundary updates use the latest solved profile between wavelength s
 
 ## Check depth resolution and compare with a reference
 
-Use `--restart-csv` with `--interpolate-restart` to move a solved temperature profile to a different number of layers. The previous mass grid must cover the new one. GiantLayers recomputes the gas structure and transfer on the new grid. The solver reports how many final layers used molecular cross sections clamped to the edge of their temperature or pressure axes.
+With `--deep-layers`, use `--deep-grid-power 2` to concentrate the deep points toward the inner boundary while retaining the same number of points and the same depth endpoints. Use `--restart-csv` with `--interpolate-restart` to move a solved temperature profile to a different number of layers. The previous mass grid must cover the new one. GiantLayers recomputes the gas structure and transfer on the new grid. The solver reports how many final layers used molecular cross sections clamped to the edge of their temperature or pressure axes.
 
 Compare the exported model with a published model at the same stellar parameters. The comparison interpolates only over the shared Rosseland depth range and reports the temperature difference in kelvin and the pressure differences in dex.
 

@@ -47,6 +47,20 @@ class NativeAtmosphereChecks(unittest.TestCase):
         linear[1] = (0, 0, 0, math.exp(8.05))
         self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0.03)
 
+    def test_deep_grid_power_concentrates_points_and_preserves_endpoints(self):
+        options = dict(layers=80, deep_layers=32, column_bottom=1750, surface_pressure=0.5)
+        abundance = {"H": 12}
+        _, plain = initialize(3500, 0, 1, abundance, **options)
+        _, concentrated = initialize(3500, 0, 1, abundance, deep_grid_power=2, **options)
+        anchor = 80 - 1 - 32
+        self.assertEqual(concentrated.column_mass[:anchor+1], plain.column_mass[:anchor+1])
+        self.assertEqual(concentrated.column_mass[-1], plain.column_mass[-1])
+        self.assertTrue(all(a < b for a,b in zip(concentrated.column_mass, concentrated.column_mass[1:])))
+        self.assertGreater(sum(x > 1695 for x in concentrated.column_mass),
+                           sum(x > 1695 for x in plain.column_mass))
+        with self.assertRaisesRegex(ValueError, "coincident layers"):
+            initialize(3500, 0, 1, abundance, deep_grid_power=1e6, **options)
+
     def test_deep_grid_refines_below_same_reference_column(self):
         _, original = initialize(3500, 1, 1, {"H": 12}, layers=56)
         _, refined = initialize(3500, 1, 1, {"H": 12}, layers=56, deep_layers=18)
