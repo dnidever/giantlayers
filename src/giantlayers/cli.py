@@ -33,7 +33,7 @@ from .transfer_cache import input_fingerprint, read_residuals, transfer_key, wri
 
 def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
                column_bottom=700.0, gray_tau_bottom=32.0, vmic=2.0, alpha=1.5,
-               chemistry=None, deep_layers=None, deep_grid_power=1.0):
+               chemistry=None, deep_layers=None, deep_grid_power=1.0, refine_mass_at=()):
     """Build an analytic gray starting profile and independent mass grid.
 
     Mass is in solar masses, pressure and column mass are cgs, and
@@ -80,6 +80,18 @@ def initialize(teff, logg, mass, abundances, *, layers=56, surface_pressure=1.0,
         if any(a >= b for a, b in zip(axis, axis[1:])):
             raise ValueError("Deep grid power produces coincident layers")
     column = tuple(scale*math.expm1(x+photosphere) for x in axis)
+    if refine_mass_at:
+        original_anchor = column[anchor]
+        if any(not math.isfinite(m) or not 0 < m < column_bottom for m in refine_mass_at):
+            raise ValueError("Refinement masses must lie strictly between the surface and bottom")
+        refined = tuple(sorted((*column, *refine_mass_at)))
+        if any(math.isclose(a, b, rel_tol=1e-12) for a, b in zip(refined, refined[1:])):
+            raise ValueError("Refinement masses must produce distinct layers")
+        positions = dict(zip(column, axis))
+        axis = [positions[m] if m in positions else math.log1p(m/scale)-photosphere
+                for m in refined]
+        column = refined
+        anchor = column.index(original_anchor)
     tau = [gray_tau_bottom*(m/column_bottom)**4 for m in column]
     temperature = [teff*(0.75*(x + 0.39))**0.25 for x in tau]
     if not chemistry.temperatures[0] <= temperature[0] <= temperature[-1] <= chemistry.temperatures[-1]:
@@ -193,6 +205,8 @@ def main():
                         help="Number of grid points below the gray photospheric anchor")
     parser.add_argument("--deep-grid-power", type=float, default=1.0,
                         help="Concentrate deep grid points toward the bottom with a power above one")
+    parser.add_argument("--refine-mass-at", type=float, action="append", default=[], metavar="GM_CM2",
+                        help="Insert a layer at this column mass without moving existing layers (repeatable)")
     parser.add_argument("--surface-pressure", type=float, default=1.0, help="Gas pressure in dyn/cm²")
     parser.add_argument("--column-bottom", type=float, default=700.0, help="Bottom column mass in g/cm²")
     parser.add_argument("--gray-tau-bottom", type=float, default=32.0, help="Seed optical depth at bottom")
@@ -277,7 +291,7 @@ def main():
         if args.atlas_format == "atlas12":
             if not args.output_atlas:
                 raise ValueError("--atlas-format atlas12 requires --output-atlas")
-            if args.layers > 72:
+            if args.layers + len(args.refine_mass_at) > 72:
                 raise ValueError("The reference ATLAS12 reader supports at most 72 depth records")
         if args.output_atlas:
             reserved = (args.wavelengths, args.abundances, args.lines, args.kernel, args.restart_csv,
@@ -316,6 +330,7 @@ def main():
             surface_pressure=args.surface_pressure, column_bottom=args.column_bottom,
             gray_tau_bottom=args.gray_tau_bottom, vmic=args.vmic, alpha=args.alpha,
             deep_layers=args.deep_layers, deep_grid_power=args.deep_grid_power,
+            refine_mass_at=args.refine_mass_at,
         )
         reference = read_wavelengths(args.wavelengths)
         strides = [args.stride, *args.refine_stride]

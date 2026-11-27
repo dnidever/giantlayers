@@ -47,6 +47,20 @@ class NativeAtmosphereChecks(unittest.TestCase):
         linear[1] = (0, 0, 0, math.exp(8.05))
         self.assertAlmostEqual(next(log_temperature_curvature(axis, linear)), 0.03)
 
+    def test_nested_mass_grid_preserves_layers_and_reference_anchor(self):
+        options = dict(layers=56, column_bottom=1750, surface_pressure=0.5)
+        abundance = {"H": 12}
+        original, baseline = initialize(3500, 0, 1, abundance, **options)
+        inserts = (200.0, 1678.0)
+        expanded, refined = initialize(3500, 0, 1, abundance, refine_mass_at=inserts, **options)
+        retained = [r for m, r in zip(refined.column_mass, expanded.structure) if m not in inserts]
+        self.assertEqual(retained, list(original.structure))
+        self.assertEqual(refined.column_mass[refined.anchor], baseline.column_mass[baseline.anchor])
+        with self.assertRaisesRegex(ValueError, "distinct layers"):
+            initialize(3500, 0, 1, abundance, refine_mass_at=(1678, 1678), **options)
+        with self.assertRaisesRegex(ValueError, "strictly between"):
+            initialize(3500, 0, 1, abundance, refine_mass_at=(1750,), **options)
+
     def test_deep_grid_power_concentrates_points_and_preserves_endpoints(self):
         options = dict(layers=80, deep_layers=32, column_bottom=1750, surface_pressure=0.5)
         abundance = {"H": 12}
